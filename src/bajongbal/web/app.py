@@ -13,6 +13,7 @@ from bajongbal.config import env_diagnostics, settings
 from bajongbal.dart.client import DartClient
 from bajongbal.kis.client import KISClient
 from bajongbal.scanner.service import run_scan
+from bajongbal.web.utils import format_number, format_to_10k, map_market
 from bajongbal.storage.db import (
     add_watchlist_item,
     get_conn,
@@ -91,6 +92,12 @@ def watchlists_page(request: Request):
     return _template_response(request=request, name='watchlists.html', context={'request': request, 'status': _status(), 'active_menu': 'watchlists'})
 
 
+
+@app.get('/types', response_class=HTMLResponse)
+def types_page(request: Request):
+    _ensure_schema()
+    return _template_response(request=request, name='types.html', context={'request': request, 'active_menu': 'types'})
+
 @app.post('/api/themes/refresh')
 def api_theme_refresh(payload: dict | None = None):
     _ensure_schema()
@@ -119,11 +126,59 @@ def api_theme_list():
     return {'items': items, 'summary': {'theme_count': len(items), 'stock_count': total}}
 
 
+
+@app.get('/api/theme-stats')
+def api_theme_stats():
+    _ensure_schema()
+    with get_conn() as conn:
+        rows = conn.execute('''
+            SELECT theme_name, COUNT(DISTINCT code) AS stock_count,
+                   ROUND(AVG(COALESCE(naver_change_rate,0)),2) AS avg_change_rate,
+                   SUM(COALESCE(naver_volume,0)) AS sum_volume,
+                   ROUND(SUM(COALESCE(naver_price,0)*COALESCE(naver_volume,0))/10000.0,2) AS sum_trading_value_10k,
+                   ROUND(SUM(CASE WHEN COALESCE(naver_change_rate,0)>0 THEN 1 ELSE 0 END),0) AS up_count,
+                   ROUND(SUM(CASE WHEN COALESCE(naver_change_rate,0)<=0 THEN 1 ELSE 0 END),0) AS down_count,
+                   MAX(updated_at) AS last_refreshed_at
+            FROM stock_theme_map
+            GROUP BY theme_name
+        ''').fetchall()
+    items=[]
+    for r in rows:
+        d=dict(r)
+        total=max(int(d.get('stock_count') or 0),1)
+        d['up_ratio']=round((float(d.get('up_count') or 0)/total)*100,2)
+        items.append(d)
+    return {'items': items}
+
 @app.get('/api/themes/{theme_id}/stocks')
 def api_theme_stocks(theme_id: str):
     _ensure_schema()
     return {'items': list_theme_stocks(theme_id=theme_id)}
 
+
+
+@app.get('/api/suggest')
+def api_suggest(q: str = '', kind: str = 'all', limit: int = 20):
+    _ensure_schema()
+    q = q.strip()
+    items: list[str] = []
+    if not q:
+        return {'items': []}
+    with get_conn() as conn:
+        if kind in {'all','theme'}:
+            rows = conn.execute('SELECT DISTINCT theme_name FROM stock_theme_map WHERE theme_name LIKE ? LIMIT ?', (f'%{q}%', limit)).fetchall()
+            items.extend([r[0] for r in rows if r[0]])
+        if kind in {'all','name'}:
+            rows = conn.execute('SELECT DISTINCT name FROM stock_theme_map WHERE name LIKE ? LIMIT ?', (f'%{q}%', limit)).fetchall()
+            items.extend([r[0] for r in rows if r[0]])
+        if kind in {'all','code'}:
+            rows = conn.execute('SELECT DISTINCT code FROM stock_theme_map WHERE code LIKE ? LIMIT ?', (f'%{q}%', limit)).fetchall()
+            items.extend([r[0] for r in rows if r[0]])
+    uniq=[]
+    for x in items:
+        if x not in uniq:
+            uniq.append(x)
+    return {'items': uniq[:limit]}
 
 @app.get('/api/theme-stocks')
 def api_theme_stocks_search(theme_id: str | None = None, theme_name: str | None = None, code: str | None = None, name: str | None = None, market: str | None = None, status: str | None = None, max_symbols: int = 100):
@@ -133,15 +188,15 @@ def api_theme_stocks_search(theme_id: str | None = None, theme_name: str | None 
     items, warnings, errors = [], [], []
     for row in base:
         if not __import__('re').fullmatch(r'\d{6}', str(row['code'])):
-            items.append({'star':'☆','theme_name':row['theme_name'],'code':row['code'],'name':row['name'],'price':'조회 실패','change_rate':'조회 실패','volume':'조회 실패','trading_value':'조회 실패','market_cap':'계산 불가','market':'UNKNOWN','fetched_at':now_iso(),'kis_status':'INVALID_CODE','failure_reason':'유효하지 않은 종목코드'})
+            items.append({'star':'☆','theme_name':row['theme_name'],'code':row['code'],'name':row['name'],'price':'조회 실패','change_rate':'조회 실패','volume':'조회 실패','trading_value':'조회 실패','market_cap':'계산 불가','market':'UNKNOWN','fetched_at':now_iso(),'kis_status':'INVALID_CODE','failure_reason':'유효하지 않은 종목코드(6자리 숫자 아님)'})
             continue
         cur = kis.get_current_price(row['code'])
         if cur.status != 'OK':
             errors.append(f"{row['code']}: {cur.status}")
-            items.append({'star': '☆', 'theme_name': row['theme_name'], 'code': row['code'], 'name': row['name'], 'price': '조회 실패', 'change_rate': '조회 실패', 'volume': '조회 실패', 'trading_value': '조회 실패', 'market_cap': '계산 불가', 'market': market or 'UNKNOWN', 'fetched_at': now_iso(), 'kis_status': cur.status, 'failure_reason': 'KIS 호출 또는 파싱 실패'})
+            items.append({'star': '☆', 'theme_name': row['theme_name'], 'code': row['code'], 'name': row['name'], 'price': '조회 실패', 'change_rate': '조회 실패', 'volume': '조회 실패', 'trading_value': '조회 실패', 'market_cap': '계산 불가', 'market': map_market(market or 'UNKNOWN'), 'fetched_at': now_iso(), 'kis_status': cur.status, 'failure_reason': 'KIS 호출 또는 파싱 실패'})
             continue
         d = cur.data
-        items.append({'star': '☆', 'theme_name': row['theme_name'], 'code': row['code'], 'name': row['name'], 'price': d.get('price', '조회 실패'), 'change_rate': d.get('change_rate', '조회 실패'), 'volume': d.get('volume', '조회 실패'), 'trading_value': d.get('trading_value', '조회 실패'), 'market_cap': d.get('market_cap') if d.get('market_cap', -1) >= 0 else '계산 불가', 'market': d.get('market', 'UNKNOWN'), 'fetched_at': now_iso(), 'kis_status': 'OK', 'failure_reason': '-'})
+        items.append({'star': '☆', 'theme_name': row['theme_name'], 'code': row['code'], 'name': row['name'], 'price': format_number(d.get('price', '조회 실패')), 'change_rate': format_number(d.get('change_rate', '조회 실패'), 2), 'volume': format_number(d.get('volume', '조회 실패')), 'trading_value': format_to_10k(d.get('trading_value')), 'market_cap': format_to_10k(d.get('market_cap')) if d.get('market_cap', -1) >= 0 else '계산 불가', 'market': map_market(d.get('market', 'UNKNOWN')), 'fetched_at': now_iso(), 'kis_status': 'OK', 'failure_reason': '-'})
     
     if status:
         items = [x for x in items if str(x.get('kis_status')) == status]
