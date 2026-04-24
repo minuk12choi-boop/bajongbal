@@ -1,0 +1,13 @@
+.env
+*.sqlite3
+outputs/
+alerts.csv
+signals.csv
+data/watchlist.csv
+data/theme_map.csv
+.kis_token*
+.dart_cache*
+.naver_theme_cache*
+__pycache__/
+.pytest_cache/
+.venv/
