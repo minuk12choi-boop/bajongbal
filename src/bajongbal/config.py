@@ -3,15 +3,38 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import os
-
-try:
-    from dotenv import load_dotenv
-except Exception:  # pragma: no cover
-    def load_dotenv():
-        return False
+import re
 
 
-load_dotenv()
+def _safe_load_dotenv() -> None:
+    """잘못된 .env로 인한 파싱 경고/중단을 피한다."""
+    env_path = Path('.env')
+    if not env_path.exists():
+        return
+
+    try:
+        lines = env_path.read_text(encoding='utf-8').splitlines()
+    except Exception:
+        return
+
+    pattern = re.compile(r'^\s*[A-Za-z_][A-Za-z0-9_]*\s*=')
+    for line in lines:
+        raw = line.strip()
+        if not raw or raw.startswith('#'):
+            continue
+        if not pattern.match(raw):
+            # 형식이 잘못된 .env면 로딩을 건너뛰고 OS 환경변수를 사용한다.
+            return
+
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(dotenv_path=env_path, override=False, verbose=False)
+    except Exception:
+        return
+
+
+_safe_load_dotenv()
 
 
 @dataclass(slots=True)

@@ -22,10 +22,21 @@
 고점 이후 조정 구간에서 `U-D-U-D-U-D-U` 구조를 감지하고 `STRONG_333 / NORMAL_333 / WEAK_333 / NO_333`로 분류합니다.
 
 ## 설치
+### macOS/Linux
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+```
+
+### Windows (PowerShell 실행 정책 이슈 우회)
+PowerShell에서 `Activate.ps1` 실행이 막히면 아래처럼 venv 파이썬을 직접 사용합니다.
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+$env:PYTHONPATH="src"
+.\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe -m bajongbal web --host 127.0.0.1 --port 8000
 ```
 
 ## 환경변수
@@ -34,6 +45,8 @@ pip install -r requirements.txt
 - `KIS_APP_KEY`
 - `KIS_APP_SECRET`
 - `KIS_BASE_URL`
+
+`.env`는 반드시 `KEY=value` 형식이어야 합니다.
 
 ## 웹 실행 방법
 ```bash
@@ -78,6 +91,11 @@ PYTHONPATH=src python -m bajongbal scan --watchlist data/watchlist.example.csv -
 python -m pytest -q
 ```
 - 외부 API 직접 호출 없이 fixture/mocking 기반으로 검증합니다.
+
+## 트러블슈팅: `python-dotenv could not parse statement`
+1. `.env` 파일 첫 줄이 깨지지 않았는지 확인
+2. 반드시 `KEY=value` 형식으로 수정
+3. OS 환경변수를 사용 중이면 `.env`를 삭제해도 동작
 
 ## 자동주문 미포함 안내
 본 프로젝트는 자동주문 시스템이 아니며, 최종 매매 판단은 사용자가 직접 수행합니다.
