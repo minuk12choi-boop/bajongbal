@@ -152,3 +152,11 @@ def get_watchlist_membership(code: str) -> list[dict]:
             (str(code),),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def clear_theme_cache() -> None:
+    with get_conn() as conn:
+        conn.execute('DELETE FROM stock_theme_map')
+        conn.execute('DELETE FROM theme_constituents')
+        conn.execute('DELETE FROM theme_snapshots')
+        conn.commit()

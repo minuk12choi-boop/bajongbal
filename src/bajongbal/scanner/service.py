@@ -63,6 +63,8 @@ def run_scan(
     theme_id: str | None = None,
     theme_name: str | None = None,
     scope_mode: str | None = None,
+    filter_code: str | None = None,
+    filter_name: str | None = None,
 ) -> dict:
     warnings: list[str] = []
     errors: list[str] = []
@@ -98,6 +100,10 @@ def run_scan(
         'final_signal_count': 0,
         'errors': [],
         'warnings': [],
+        'invalid_code_count': 0,
+        'filter_code': filter_code,
+        'filter_name': filter_name,
+        'filtered_target_count': 0,
     }
 
     with get_conn() as conn:
@@ -143,6 +149,11 @@ def run_scan(
     else:
         all_targets = _load_watchlist(watchlist_path)
 
+    if filter_code:
+        all_targets = [x for x in all_targets if filter_code in str(x.get('code',''))]
+    if filter_name:
+        all_targets = [x for x in all_targets if filter_name.lower() in str(x.get('name','')).lower()]
+    diagnostics['filtered_target_count'] = len(all_targets)
     diagnostics['scan_target_count_before_limit'] = len(all_targets)
     watchlist = all_targets[:max_symbols]
     diagnostics['scan_target_count'] = len(watchlist)
@@ -162,6 +173,11 @@ def run_scan(
 
     for w in watchlist:
         code, name = w['code'], w['name']
+        if not __import__('re').fullmatch(r'\d{6}', str(code)):
+            diagnostics['invalid_code_count'] += 1
+            errors.append(f'{code}: INVALID_CODE')
+            diagnostics['kis_current_price_fail_count'] += 1
+            continue
         if demo_mode:
             cur = {'code': code, 'price': 10000.0, 'change_rate': 0.5, 'volume': 100000, 'trading_value': 1000000000}
             daily = [{'date': f'2026-01-{i:02d}', 'open': 9900 + i, 'high': 10100 + i, 'low': 9800 + i, 'close': 10000 + i, 'volume': 10000 + i, 'trading_value': 100000000 + i, 'timeframe': 'D'} for i in range(1, 121)]

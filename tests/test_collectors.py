@@ -12,6 +12,6 @@ def test_parse_theme_list_page():
 
 def test_parse_theme_detail_page():
     html = Path('tests/fixtures/naver_theme_detail.html').read_text(encoding='utf-8')
-    rows = parse_theme_detail_page(html, '100', '반도체')
+    rows, *_ = parse_theme_detail_page(html, '100', '반도체')
     assert rows[0]['code'] == '005930'
     assert rows[1]['name'] == 'SK하이닉스'

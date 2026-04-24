@@ -25,7 +25,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest='command')
 
     sub.add_parser('init-db')
-    sub.add_parser('refresh-themes')
+    rt = sub.add_parser('refresh-themes')
+    rt.add_argument('--force', action='store_true')
+    sub.add_parser('clear-theme-cache')
     sub.add_parser('sync-dart')
     sub.add_parser('clear-demo-signals')
     sub.add_parser('watchlist-groups')
@@ -196,10 +198,16 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(list_theme_stocks_filtered(theme_id=args.theme_id, theme_name=args.theme_name, limit=args.limit), ensure_ascii=False))
         return 0
 
+    if args.command == 'clear-theme-cache':
+        from bajongbal.storage.db import clear_theme_cache
+        clear_theme_cache()
+        print('테마 캐시 초기화 완료')
+        return 0
+
     if args.command == 'refresh-themes':
         from bajongbal.collectors.naver_theme_collector import refresh_naver_themes
 
-        print(refresh_naver_themes())
+        print(refresh_naver_themes(force=getattr(args, 'force', False)))
         return 0
 
     if args.command == 'sync-dart':

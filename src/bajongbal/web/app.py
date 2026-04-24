@@ -92,9 +92,13 @@ def watchlists_page(request: Request):
 
 
 @app.post('/api/themes/refresh')
-def api_theme_refresh():
+def api_theme_refresh(payload: dict | None = None):
     _ensure_schema()
-    result = refresh_naver_themes()
+    payload = payload or {}
+    try:
+        result = refresh_naver_themes(force=bool(payload.get('force', False)))
+    except TypeError:
+        result = refresh_naver_themes()
     with get_conn() as conn:
         conn.execute('INSERT INTO theme_snapshots(refreshed_at, success, message) VALUES (?,?,?)', (result.last_refreshed_at or now_iso(), int(result.success), result.message))
         conn.commit()
@@ -122,19 +126,28 @@ def api_theme_stocks(theme_id: str):
 
 
 @app.get('/api/theme-stocks')
-def api_theme_stocks_search(theme_id: str | None = None, theme_name: str | None = None, code: str | None = None, name: str | None = None, market: str | None = None, max_symbols: int = 100):
+def api_theme_stocks_search(theme_id: str | None = None, theme_name: str | None = None, code: str | None = None, name: str | None = None, market: str | None = None, status: str | None = None, max_symbols: int = 100):
     _ensure_schema()
     base = list_theme_stocks_filtered(theme_id=theme_id, theme_name=theme_name, code=code, name=name, limit=max_symbols)
     kis = KISClient(settings.kis_base_url)
     items, warnings, errors = [], [], []
     for row in base:
+        if not __import__('re').fullmatch(r'\d{6}', str(row['code'])):
+            items.append({'star':'☆','theme_name':row['theme_name'],'code':row['code'],'name':row['name'],'price':'조회 실패','change_rate':'조회 실패','volume':'조회 실패','trading_value':'조회 실패','market_cap':'계산 불가','market':'UNKNOWN','fetched_at':now_iso(),'kis_status':'INVALID_CODE','failure_reason':'유효하지 않은 종목코드'})
+            continue
         cur = kis.get_current_price(row['code'])
         if cur.status != 'OK':
             errors.append(f"{row['code']}: {cur.status}")
-            items.append({'star': '☆', 'theme_name': row['theme_name'], 'code': row['code'], 'name': row['name'], 'price': '조회 실패', 'change_rate': '조회 실패', 'volume': '조회 실패', 'trading_value': '조회 실패', 'market_cap': '계산 불가', 'market': market or 'UNKNOWN', 'fetched_at': now_iso(), 'kis_status': cur.status})
+            items.append({'star': '☆', 'theme_name': row['theme_name'], 'code': row['code'], 'name': row['name'], 'price': '조회 실패', 'change_rate': '조회 실패', 'volume': '조회 실패', 'trading_value': '조회 실패', 'market_cap': '계산 불가', 'market': market or 'UNKNOWN', 'fetched_at': now_iso(), 'kis_status': cur.status, 'failure_reason': 'KIS 호출 또는 파싱 실패'})
             continue
         d = cur.data
-        items.append({'star': '☆', 'theme_name': row['theme_name'], 'code': row['code'], 'name': row['name'], 'price': d.get('price', '조회 실패'), 'change_rate': d.get('change_rate', '조회 실패'), 'volume': d.get('volume', '조회 실패'), 'trading_value': d.get('trading_value', '조회 실패'), 'market_cap': d.get('market_cap') if d.get('market_cap', -1) >= 0 else '계산 불가', 'market': d.get('market', 'UNKNOWN'), 'fetched_at': now_iso(), 'kis_status': 'OK'})
+        items.append({'star': '☆', 'theme_name': row['theme_name'], 'code': row['code'], 'name': row['name'], 'price': d.get('price', '조회 실패'), 'change_rate': d.get('change_rate', '조회 실패'), 'volume': d.get('volume', '조회 실패'), 'trading_value': d.get('trading_value', '조회 실패'), 'market_cap': d.get('market_cap') if d.get('market_cap', -1) >= 0 else '계산 불가', 'market': d.get('market', 'UNKNOWN'), 'fetched_at': now_iso(), 'kis_status': 'OK', 'failure_reason': '-'})
+    
+    if status:
+        items = [x for x in items if str(x.get('kis_status')) == status]
+    if market:
+        items = [x for x in items if market in str(x.get('market', ''))]
+
     if len(base) >= max_symbols:
         warnings.append(f'조회 대상이 많아 상위 {max_symbols}건만 조회했습니다.')
     return {'items': items, 'diagnostics': {'requested_max_symbols': max_symbols, 'returned': len(items)}, 'warnings': warnings, 'errors': errors[:10]}
@@ -155,7 +168,7 @@ def api_scan(payload: dict | None = None):
         score_threshold=float(payload.get('score_threshold', 60)), use_dart=bool(payload.get('use_dart', True)), max_symbols=int(payload.get('max_symbols', 50)),
         target_mode=payload.get('target_mode', '관심종목'), demo_mode=bool(payload.get('demo_mode', False)),
         watchlist_group_id=int(payload['watchlist_group_id']) if payload.get('watchlist_group_id') else None,
-        theme_id=str(payload['theme_id']) if payload.get('theme_id') else None, theme_name=payload.get('theme_name'), scope_mode=payload.get('scope_mode'),
+        theme_id=str(payload['theme_id']) if payload.get('theme_id') else None, theme_name=payload.get('theme_name'), scope_mode=payload.get('scope_mode'), filter_code=payload.get('filter_code'), filter_name=payload.get('filter_name'),
     )
     LAST_SCAN.update(out)
     return out
