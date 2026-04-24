@@ -99,3 +99,38 @@ python -m pytest -q
 
 ## 자동주문 미포함 안내
 본 프로젝트는 자동주문 시스템이 아니며, 최종 매매 판단은 사용자가 직접 수행합니다.
+
+
+## 로컬 환경변수 설정 (중요)
+- Codex 실행 환경에 등록된 환경변수와 **로컬 PC 환경변수는 별개**입니다.
+- 로컬에서 웹/CLI 실행 시에는 반드시 로컬 PC에도 환경변수를 설정해야 합니다.
+
+PowerShell (현재 세션)
+```powershell
+$env:KIS_APP_KEY="..."
+$env:KIS_APP_SECRET="..."
+$env:KIS_BASE_URL="..."
+$env:DART_API_KEY="..."
+```
+
+Windows 영구 설정
+```powershell
+setx KIS_APP_KEY "..."
+setx KIS_APP_SECRET "..."
+setx KIS_BASE_URL "..."
+setx DART_API_KEY "..."
+```
+
+> README에는 실제 키 값을 절대 기록하지 마세요.
+
+## KIS 미설정 / 데모 모드 동작
+- KIS 환경변수가 미설정이거나 인증 실패 시 **실제 후보가 나오지 않는 것이 정상**입니다.
+- 기본값은 데모 모드 OFF이며, 이때는 10000원 같은 더미 후보를 생성하지 않습니다.
+- 데모 모드는 명시적으로 ON 했을 때만 동작하며, 결과에 `데모 데이터` 표시가 붙습니다.
+
+
+## 데모 시그널 정리
+```bash
+PYTHONPATH=src python -m bajongbal clear-demo-signals
+```
+- 최근 감지 이력 API(`/api/signals/recent`)는 기본적으로 데모(is_demo=1) 데이터를 숨깁니다.

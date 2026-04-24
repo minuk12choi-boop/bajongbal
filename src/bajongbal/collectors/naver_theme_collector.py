@@ -115,7 +115,7 @@ def refresh_naver_themes() -> ThemeRefreshResult:
             page += 1
 
         if not all_themes:
-            return ThemeRefreshResult(False, 0, 0, '테마 목록이 비어 기존 캐시 유지')
+            return ThemeRefreshResult(False, 0, 0, '테마 목록이 비어 기존 캐시 유지', warning=True, used_cache=True, last_refreshed_at=now_iso())
 
         all_constituents: list[dict[str, Any]] = []
         for theme in all_themes:
@@ -139,6 +139,8 @@ def refresh_naver_themes() -> ThemeRefreshResult:
                     (c['code'], c['name'], c['theme_id'], c['theme_name'], now_iso()),
                 )
             conn.commit()
-        return ThemeRefreshResult(True, len(all_themes), len(all_constituents), '테마 갱신 완료')
+        if len(all_constituents) == 0:
+            return ThemeRefreshResult(False, len(all_themes), 0, '테마 상세 수집 0건 (HTML 구조 변경 가능성)', warning=True, used_cache=True, last_refreshed_at=now_iso())
+        return ThemeRefreshResult(True, len(all_themes), len(all_constituents), '테마 갱신 완료', warning=False, used_cache=False, last_refreshed_at=now_iso())
     except Exception:
-        return ThemeRefreshResult(False, 0, 0, '테마 데이터 갱신 실패 / 기존 캐시 사용 중')
+        return ThemeRefreshResult(False, 0, 0, '테마 데이터 갱신 실패 / 기존 캐시 사용 중 (HTML 구조 변경 가능성)', warning=True, used_cache=True, last_refreshed_at=now_iso())

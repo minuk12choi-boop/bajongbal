@@ -17,11 +17,9 @@ from bajongbal.storage.db import get_conn, init_db
 
 
 def _ensure_schema() -> None:
-    """요청 시점에도 스키마를 보장해 테이블 미생성으로 500이 나지 않게 방어한다."""
     try:
         init_db()
     except Exception:
-        # 경로 권한 문제 등에서도 대시보드가 완전히 죽지 않도록 보호
         return
 
 
@@ -33,12 +31,21 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title='BAJONGBAL 급등직전 감지기', lifespan=lifespan)
 templates = Jinja2Templates(directory=str(Path(__file__).parent / 'templates'))
-LAST_SCAN: dict = {'signals': [], 'theme_strengths': []}
+LAST_SCAN: dict = {'signals': [], 'theme_strengths': [], 'warnings': [], 'errors': [], 'scan_target_count': 0, 'scan_success_count': 0, 'scan_fail_count': 0, 'is_demo': False}
 
 
 def _template_response(request: Request, name: str, context: dict):
-    """Starlette/FastAPI 버전 차이에 안전한 TemplateResponse 호출 래퍼."""
     return templates.TemplateResponse(request=request, name=name, context=context)
+
+
+def _config_status() -> dict:
+    return {
+        'KIS_APP_KEY': 'Y' if settings.has_kis_app_key else 'N',
+        'KIS_APP_SECRET': 'Y' if settings.has_kis_app_secret else 'N',
+        'KIS_BASE_URL': 'Y' if settings.has_kis_base_url else 'N',
+        'DART_API_KEY': 'Y' if settings.has_dart_api_key else 'N',
+        'kis_base_url_message': 'KIS_BASE_URL 미설정' if not settings.has_kis_base_url else '정상',
+    }
 
 
 def _status() -> dict:
@@ -59,6 +66,7 @@ def _status() -> dict:
         'dart_ok': dart.health(),
         'theme_updated_at': row['refreshed_at'] if row else '테마 캐시 없음',
         'theme_message': row['message'] if row else '테마 캐시 없음 / 테마 갱신 필요',
+        'config': _config_status(),
     }
 
 
@@ -73,7 +81,26 @@ def dashboard(request: Request):
 def api_theme_refresh():
     _ensure_schema()
     result = refresh_naver_themes()
-    return result.__dict__
+    with get_conn() as conn:
+        theme_cnt = conn.execute('SELECT COUNT(DISTINCT theme_id) FROM theme_constituents').fetchone()[0]
+        map_cnt = conn.execute('SELECT COUNT(*) FROM stock_theme_map').fetchone()[0]
+        last = conn.execute('SELECT refreshed_at FROM theme_snapshots ORDER BY id DESC LIMIT 1').fetchone()
+
+    ok = bool(result.success and theme_cnt > 0 and map_cnt > 0)
+    warning = not ok
+    msg = result.message
+    if map_cnt == 0:
+        msg = '수집 0건: 네이버 HTML 구조 변경 가능성 또는 네트워크 이슈'
+
+    return {
+        'ok': ok,
+        'warning': warning,
+        'theme_count': theme_cnt,
+        'stock_count': map_cnt,
+        'used_cache': not ok,
+        'reason': msg,
+        'last_refreshed_at': last['refreshed_at'] if last else None,
+    }
 
 
 @app.get('/api/themes/status')
@@ -99,18 +126,28 @@ def api_scan(payload: dict | None = None):
         score_threshold=float(payload.get('score_threshold', 60)),
         use_dart=bool(payload.get('use_dart', True)),
         max_symbols=int(payload.get('max_symbols', 50)),
+        target_mode=payload.get('target_mode', '관심종목'),
+        demo_mode=bool(payload.get('demo_mode', False)),
     )
     LAST_SCAN.update(out)
     return out
 
 
 @app.get('/api/signals/recent')
-def api_recent_signals(limit: int = 50):
+def api_recent_signals(limit: int = 50, include_demo: bool = False):
     _ensure_schema()
     with get_conn() as conn:
-        rows = conn.execute('SELECT * FROM signals ORDER BY id DESC LIMIT ?', (limit,)).fetchall()
+        if include_demo:
+            rows = conn.execute('SELECT * FROM signals ORDER BY id DESC LIMIT ?', (limit,)).fetchall()
+        else:
+            rows = conn.execute('SELECT * FROM signals WHERE COALESCE(is_demo,0)=0 ORDER BY id DESC LIMIT ?', (limit,)).fetchall()
         data = [dict(r) for r in rows]
     return {'items': data}
+
+
+@app.get('/api/config/status')
+def api_config_status():
+    return _config_status()
 
 
 @app.get('/api/health')

@@ -27,6 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser('init-db')
     sub.add_parser('refresh-themes')
     sub.add_parser('sync-dart')
+    sub.add_parser('clear-demo-signals')
 
     bc = sub.add_parser('build-candidates')
     bc.add_argument('--date', required=True)
@@ -38,6 +39,8 @@ def build_parser() -> argparse.ArgumentParser:
     bc.add_argument('--no-dart', action='store_true')
     bc.add_argument('--max-symbols', type=int, default=50)
     bc.add_argument('--dry-run', action='store_true')
+    bc.add_argument('--target-mode', default='관심종목')
+    bc.add_argument('--demo-mode', action='store_true')
 
     sc = sub.add_parser('scan')
     sc.add_argument('--watchlist', default='data/watchlist.example.csv')
@@ -50,6 +53,8 @@ def build_parser() -> argparse.ArgumentParser:
     sc.add_argument('--no-dart', action='store_true')
     sc.add_argument('--max-symbols', type=int, default=50)
     sc.add_argument('--dry-run', action='store_true')
+    sc.add_argument('--target-mode', default='관심종목')
+    sc.add_argument('--demo-mode', action='store_true')
 
     web = sub.add_parser('web')
     web.add_argument('--host', default='0.0.0.0')
@@ -73,7 +78,7 @@ def _run_scan(args):
     from bajongbal.scanner.service import run_scan
 
     use_dart = False if getattr(args, 'no_dart', False) else True
-    out = run_scan(KISClient(settings.kis_base_url), DartClient(), args.watchlist, args.score_threshold, use_dart, args.max_symbols)
+    out = run_scan(KISClient(settings.kis_base_url), DartClient(), args.watchlist, args.score_threshold, use_dart, args.max_symbols, target_mode=args.target_mode, demo_mode=args.demo_mode)
     ymd = datetime.utcnow().strftime('%Y%m%d')
     path = Path(args.output.replace('YYYYMMDD', ymd))
     if not args.dry_run:
@@ -98,6 +103,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == 'sync-dart':
         print('DART 동기화 구조 준비 완료')
+        return 0
+
+    if args.command == 'clear-demo-signals':
+        with get_conn() as conn:
+            conn.execute('DELETE FROM signals WHERE COALESCE(is_demo,0)=1')
+            conn.commit()
+        print('데모 시그널 삭제 완료')
         return 0
 
     if args.command in {'build-candidates', 'scan'}:

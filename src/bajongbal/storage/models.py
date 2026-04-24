@@ -10,6 +10,9 @@ class ThemeRefreshResult:
     theme_count: int
     stock_count: int
     message: str
+    warning: bool = False
+    used_cache: bool = False
+    last_refreshed_at: str | None = None
 
 
 @dataclass
