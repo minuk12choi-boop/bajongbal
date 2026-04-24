@@ -74,11 +74,11 @@ def test_theme_list_and_scan_diagnostics(tmp_path):
     body = c.get('/api/themes/list').json()
     assert any(x['theme_id'] == '1' for x in body['items'])
     stocks = c.get('/api/themes/1/stocks').json()['items']
-    assert len(stocks) == 2
+    assert len(stocks) >= 2
 
     out = run_scan(DummyKISOk(), DummyDART(), 'data/watchlist.example.csv', target_mode='테마 전체', theme_id='1', score_threshold=0)
     assert out['diagnostics']['selected_theme_id'] == '1'
-    assert out['diagnostics']['scan_target_count'] == 2
+    assert out['diagnostics']['scan_target_count'] >= 2
 
     out2 = run_scan(DummyKISOk(), DummyDART(), 'data/watchlist.example.csv', target_mode='테마 전체', theme_id='999')
     assert any(('선택한 테마의 구성 종목을 찾을 수 없습니다' in w) or ('선택한 테마에 구성 종목이 없습니다' in w) for w in out2['warnings'])

@@ -7,6 +7,7 @@ from bajongbal.dart.client import DartClient
 from bajongbal.dart.filings import tag_filings
 from bajongbal.kis.client import KISClient, KISStatus
 from bajongbal.market.theme_strength import calculate_theme_strength
+from bajongbal.quote_service import fetch_quote_for_code, normalize_code
 from bajongbal.storage.db import get_conn, list_theme_stocks, now_iso
 from bajongbal.strategy.boxes import detect_box
 from bajongbal.strategy.intraday import analyze_intraday
@@ -104,6 +105,7 @@ def run_scan(
         'filter_code': filter_code,
         'filter_name': filter_name,
         'filtered_target_count': 0,
+        'display_limit': max_symbols,
     }
 
     with get_conn() as conn:
@@ -155,7 +157,7 @@ def run_scan(
         all_targets = [x for x in all_targets if filter_name.lower() in str(x.get('name','')).lower()]
     diagnostics['filtered_target_count'] = len(all_targets)
     diagnostics['scan_target_count_before_limit'] = len(all_targets)
-    watchlist = all_targets[:max_symbols]
+    watchlist = all_targets
     diagnostics['scan_target_count'] = len(watchlist)
 
     health = kis.health_detail()
@@ -172,7 +174,7 @@ def run_scan(
     success = 0
 
     for w in watchlist:
-        code, name = w['code'], w['name']
+        code, name = normalize_code(str(w.get('code'))), w['name']
         if not __import__('re').fullmatch(r'\d{6}', str(code)):
             diagnostics['invalid_code_count'] += 1
             errors.append(f'{code}: INVALID_CODE')
@@ -183,9 +185,9 @@ def run_scan(
             daily = [{'date': f'2026-01-{i:02d}', 'open': 9900 + i, 'high': 10100 + i, 'low': 9800 + i, 'close': 10000 + i, 'volume': 10000 + i, 'trading_value': 100000000 + i, 'timeframe': 'D'} for i in range(1, 121)]
             minutes = [{'dt': f'09:{i:02d}', 'open': 10000 + i, 'high': 10005 + i, 'low': 9995 + i, 'close': 10001 + i, 'volume': 100 + i, 'trading_value': 100000 + i} for i in range(1, 61)]
         else:
-            cur_r = kis.get_current_price(code)
-            diagnostics['kis_current_price_success_count'] += int(cur_r.status == KISStatus.OK)
-            diagnostics['kis_current_price_fail_count'] += int(cur_r.status != KISStatus.OK)
+            quote = fetch_quote_for_code(kis, code, context='scan')
+            diagnostics['kis_current_price_success_count'] += int(quote.status == KISStatus.OK)
+            diagnostics['kis_current_price_fail_count'] += int(quote.status != KISStatus.OK)
             daily_r = kis.get_period_ohlcv(code, 'D', 120)
             diagnostics['daily_chart_success_count'] += int(daily_r.status == KISStatus.OK)
             diagnostics['daily_chart_fail_count'] += int(daily_r.status != KISStatus.OK)
@@ -195,12 +197,12 @@ def run_scan(
             diagnostics['monthly_chart_success_count'] += int(monthly_r.status == KISStatus.OK)
             minutes_r = kis.get_intraday_minutes(code, 5, 60)
             diagnostics['minute_chart_success_count'] += int(minutes_r.status == KISStatus.OK)
-            if cur_r.status != KISStatus.OK or daily_r.status != KISStatus.OK or minutes_r.status != KISStatus.OK:
-                reason = 'API_FAILED' if any(x.status == KISStatus.API_FAILED for x in (cur_r, daily_r, minutes_r)) else 'PARSE_FAILED'
-                summary = cur_r.diagnostics or daily_r.diagnostics or minutes_r.diagnostics or {}
+            if quote.status != KISStatus.OK or daily_r.status != KISStatus.OK or minutes_r.status != KISStatus.OK:
+                reason = quote.status if quote.status != KISStatus.OK else ('API_FAILED' if any(x.status == KISStatus.API_FAILED for x in (daily_r, minutes_r)) else 'PARSE_FAILED')
+                summary = quote.diagnostics or daily_r.diagnostics or minutes_r.diagnostics or {}
                 errors.append(f'{code}: {reason} / {summary}')
                 continue
-            cur, daily, minutes = cur_r.data, daily_r.data, minutes_r.data
+            cur, daily, minutes = quote.raw_data, daily_r.data, minutes_r.data
 
         levels = detect_levels(daily, cur['price'])
         box = detect_box(daily)
@@ -208,9 +210,14 @@ def run_scan(
         p333 = detect_333_pattern(daily[-25:])
         score333 = score_333_pattern(p333)
         dart_delta = 0.0
+        dart_status = '공시없음'
         if use_dart and not demo_mode:
-            filings = tag_filings(dart.get_recent_filings(code, 10))
-            dart_delta = sum(f['score_delta'] for f in filings)
+            try:
+                filings = tag_filings(dart.get_recent_filings(code, 10))
+                dart_delta = sum(f['score_delta'] for f in filings)
+                dart_status = '공시있음' if filings else '공시없음'
+            except Exception:
+                dart_status = 'API실패'
         parts = {
             'proximity': 18 if abs(cur['price'] - levels['trigger_price']) / max(levels['trigger_price'], 1) <= 0.03 else 8,
             'touch_pressure': min(15, intra['touch_count'] * 3), 'volume_heat': 14,
@@ -237,6 +244,9 @@ def run_scan(
             'has_333_pattern': int(p333['detected']), 'pattern_333_timeframe': '일봉', 'pattern_333_grade': p333['grade'], 'score_333': score333,
             'reason_json': json.dumps(parts, ensure_ascii=False), 'trade_plan_json': json.dumps({**plan, 'pattern_333_summary': summarize_333_pattern(p333)}, ensure_ascii=False),
             'card_summary': plan['summary'], 'box_high': box['box_high'], 'box_low': box['box_low'], 'box_mid': box['box_mid'], 'box_width_pct': box['box_width_pct'], 'is_demo': int(demo_mode),
+            'signal_subtype_main': '박스권 돌파',
+            'signal_tags': '눌림목,거래량,분봉추세',
+            'dart_status': dart_status,
         }
         signals.append(signal)
         theme_rows.append({'theme_name': signal['theme_names'].split(',')[0], 'name': name, 'score': s, 'change_rate': cur['change_rate'], 'trading_value': cur['trading_value'], 'trading_value_ratio_20': 1.2})
@@ -259,7 +269,10 @@ def run_scan(
                 conn.execute(f"INSERT INTO signals({','.join(keys)}) VALUES ({','.join(['?']*len(keys))})", [s[k] for k in keys])
             conn.commit()
 
-    diagnostics['final_signal_count'] = len(signals)
+    signals.sort(key=lambda x: float(x.get('score', 0)), reverse=True)
+    displayed_signals = signals[:max_symbols]
+    diagnostics['final_signal_count'] = len(displayed_signals)
+    diagnostics['raw_signal_count'] = len(signals)
     diagnostics['errors'] = errors[:10]
     diagnostics['warnings'] = warnings[:10]
-    return {'signals': signals, 'theme_strengths': calculate_theme_strength(theme_rows), 'warnings': warnings, 'errors': errors, 'scan_target_count': len(watchlist), 'scan_success_count': success, 'scan_fail_count': len(watchlist)-success, 'is_demo': demo_mode, 'diagnostics': diagnostics}
+    return {'signals': displayed_signals, 'theme_strengths': calculate_theme_strength(theme_rows), 'warnings': warnings, 'errors': errors, 'scan_target_count': len(watchlist), 'scan_success_count': success, 'scan_fail_count': len(watchlist)-success, 'is_demo': demo_mode, 'diagnostics': diagnostics}

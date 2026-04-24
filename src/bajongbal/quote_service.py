@@ -19,6 +19,7 @@ class QuoteResult:
     market_cap_10k: str
     failure_reason: str
     diagnostics: dict
+    raw_data: dict | None = None
 
 
 def normalize_code(code: str | None) -> str:
@@ -35,13 +36,13 @@ def code_valid(code: str | None) -> bool:
 def fetch_quote_for_code(kis: KISClient, code: str, context: str = 'default') -> QuoteResult:
     ncode = normalize_code(code)
     if not ncode:
-        return QuoteResult(ncode, 'CODE_MISSING', 'UNKNOWN', '조회 실패', '조회 실패', '조회 실패', '계산 불가', '계산 불가', '종목코드가 없습니다.', {'quote_context': context})
+        return QuoteResult(ncode, 'CODE_MISSING', 'UNKNOWN', '조회 실패', '조회 실패', '조회 실패', '계산 불가', '계산 불가', '종목코드가 없습니다.', {'quote_context': context}, raw_data=None)
     if not code_valid(ncode):
-        return QuoteResult(ncode, 'INVALID_CODE', 'UNKNOWN', '조회 실패', '조회 실패', '조회 실패', '계산 불가', '계산 불가', '유효하지 않은 종목코드(6자리 숫자 아님)', {'quote_context': context})
+        return QuoteResult(ncode, 'INVALID_CODE', 'UNKNOWN', '조회 실패', '조회 실패', '조회 실패', '계산 불가', '계산 불가', '유효하지 않은 종목코드(6자리 숫자 아님)', {'quote_context': context}, raw_data=None)
     r = kis.get_current_price(ncode)
     if r.status != KISStatus.OK:
         reason = 'PARSE_FAILED' if r.status == KISStatus.PARSE_FAILED else 'API_FAILED'
-        return QuoteResult(ncode, reason, 'UNKNOWN', '조회 실패', '조회 실패', '조회 실패', '계산 불가', '계산 불가', 'KIS 호출 또는 파싱 실패', {'quote_context': context, **(r.diagnostics or {})})
+        return QuoteResult(ncode, reason, 'UNKNOWN', '조회 실패', '조회 실패', '조회 실패', '계산 불가', '계산 불가', 'KIS 호출 또는 파싱 실패', {'quote_context': context, **(r.diagnostics or {})}, raw_data=None)
     d = r.data
     return QuoteResult(
         ncode,
@@ -54,6 +55,7 @@ def fetch_quote_for_code(kis: KISClient, code: str, context: str = 'default') ->
         format_to_10k(d.get('market_cap')) if d.get('market_cap', -1) >= 0 else '계산 불가',
         '-',
         {'quote_context': context},
+        raw_data=d,
     )
 
 

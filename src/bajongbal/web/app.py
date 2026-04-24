@@ -12,8 +12,8 @@ from bajongbal.collectors.naver_theme_collector import refresh_naver_themes
 from bajongbal.config import env_diagnostics, settings
 from bajongbal.dart.client import DartClient
 from bajongbal.kis.client import KISClient
+from bajongbal.quote_service import code_valid, diagnose_quote, fetch_quote_for_code, normalize_code
 from bajongbal.scanner.service import run_scan
-from bajongbal.web.utils import format_number, format_to_10k, map_market
 from bajongbal.storage.db import (
     add_watchlist_item,
     get_conn,
@@ -187,16 +187,10 @@ def api_theme_stocks_search(theme_id: str | None = None, theme_name: str | None 
     kis = KISClient(settings.kis_base_url)
     items, warnings, errors = [], [], []
     for row in base:
-        if not __import__('re').fullmatch(r'\d{6}', str(row['code'])):
-            items.append({'star':'☆','theme_name':row['theme_name'],'code':row['code'],'name':row['name'],'price':'조회 실패','change_rate':'조회 실패','volume':'조회 실패','trading_value':'조회 실패','market_cap':'계산 불가','market':'UNKNOWN','fetched_at':now_iso(),'kis_status':'INVALID_CODE','failure_reason':'유효하지 않은 종목코드(6자리 숫자 아님)'})
-            continue
-        cur = kis.get_current_price(row['code'])
-        if cur.status != 'OK':
-            errors.append(f"{row['code']}: {cur.status}")
-            items.append({'star': '☆', 'theme_name': row['theme_name'], 'code': row['code'], 'name': row['name'], 'price': '조회 실패', 'change_rate': '조회 실패', 'volume': '조회 실패', 'trading_value': '조회 실패', 'market_cap': '계산 불가', 'market': map_market(market or 'UNKNOWN'), 'fetched_at': now_iso(), 'kis_status': cur.status, 'failure_reason': 'KIS 호출 또는 파싱 실패'})
-            continue
-        d = cur.data
-        items.append({'star': '☆', 'theme_name': row['theme_name'], 'code': row['code'], 'name': row['name'], 'price': format_number(d.get('price', '조회 실패')), 'change_rate': format_number(d.get('change_rate', '조회 실패'), 2), 'volume': format_number(d.get('volume', '조회 실패')), 'trading_value': format_to_10k(d.get('trading_value')), 'market_cap': format_to_10k(d.get('market_cap')) if d.get('market_cap', -1) >= 0 else '계산 불가', 'market': map_market(d.get('market', 'UNKNOWN')), 'fetched_at': now_iso(), 'kis_status': 'OK', 'failure_reason': '-'})
+        q = fetch_quote_for_code(kis, str(row.get('code')), context='theme_stocks')
+        if q.status != 'OK':
+            errors.append(f"{row.get('code')}: {q.status}")
+        items.append({'star': '☆', 'theme_name': row.get('theme_name'), 'code': q.code or row.get('code'), 'name': row.get('name'), 'price': q.price, 'change_rate': q.change_rate, 'volume': q.volume, 'trading_value': q.trading_value_10k, 'market_cap': q.market_cap_10k, 'market': q.market, 'fetched_at': now_iso(), 'kis_status': q.status, 'failure_reason': q.failure_reason})
     
     if status:
         items = [x for x in items if str(x.get('kis_status')) == status]
@@ -281,7 +275,36 @@ def api_watchlist_items(group_id: int):
 @app.post('/api/watchlists/{group_id}/items')
 def api_watchlist_item_create(group_id: int, payload: dict):
     _ensure_schema()
-    return add_watchlist_item(group_id, str(payload['code']), payload.get('name'), payload.get('market'), payload.get('theme_names'), payload.get('memo'))
+    code = normalize_code(payload.get('code'))
+    if not code:
+        return {'ok': False, 'error': '종목코드가 없습니다.', 'code': ''}
+    if not code_valid(code):
+        return {'ok': False, 'error': '유효하지 않은 종목코드(6자리 숫자 아님)', 'code': code}
+    return add_watchlist_item(group_id, code, payload.get('name'), payload.get('market'), payload.get('theme_names'), payload.get('memo'))
+
+
+@app.get('/api/watchlists/{group_id}/quotes')
+def api_watchlist_quotes(group_id: int):
+    _ensure_schema()
+    items = list_watchlist_items(group_id)
+    kis = KISClient(settings.kis_base_url)
+    out = []
+    for row in items:
+        q = fetch_quote_for_code(kis, str(row.get('code')), context='watchlist')
+        out.append(
+            {
+                **row,
+                'price': q.price,
+                'change_rate': q.change_rate,
+                'volume': q.volume,
+                'trading_value': q.trading_value_10k,
+                'market_cap': q.market_cap_10k,
+                'kis_status': q.status,
+                'failure_reason': q.failure_reason,
+                'market': q.market,
+            }
+        )
+    return {'items': out}
 
 
 @app.delete('/api/watchlists/{group_id}/items/{item_id}')
@@ -309,3 +332,10 @@ def api_config_status():
 def api_health():
     _ensure_schema()
     return {'ok': True, **_status()}
+
+
+@app.get('/api/quote/diagnose')
+def api_quote_diagnose(code: str = ''):
+    _ensure_schema()
+    kis = KISClient(settings.kis_base_url)
+    return diagnose_quote(kis, code)

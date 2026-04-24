@@ -53,7 +53,7 @@ def test_selected_theme_count_and_limit(tmp_path):
     out = run_scan(DummyKISOk(), DummyDART(), 'data/watchlist.example.csv', scope_mode='selected_theme', theme_id='64', theme_name='2차전지', max_symbols=50, score_threshold=0)
     assert out['diagnostics']['selected_theme_stock_count'] == 144
     assert out['diagnostics']['scan_target_count_before_limit'] == 144
-    assert out['diagnostics']['scan_target_count'] == 50
+    assert out['diagnostics']['scan_target_count'] == 144
 
 
 def test_scope_mode_selected_theme_requires_theme(tmp_path):
@@ -73,7 +73,7 @@ def test_scope_mode_watchlist_group(tmp_path):
     with get_conn() as conn:
         conn.execute("INSERT INTO watchlist_groups(name,description,created_at,updated_at,is_active) VALUES ('g','', '2026-01-01','2026-01-01',1)")
         gid = conn.execute('SELECT id FROM watchlist_groups').fetchone()[0]
-        conn.execute("INSERT INTO watchlist_items(group_id,code,name,added_at,updated_at,is_active) VALUES (?,?,?,?,?,1)", (gid, '005930', '삼성전자', '2026-01-01', '2026-01-01'))
+        conn.execute("INSERT OR IGNORE INTO watchlist_items(group_id,code,name,added_at,updated_at,is_active) VALUES (?,?,?,?,?,1)", (gid, '005930', '삼성전자', '2026-01-01', '2026-01-01'))
         conn.commit()
     out = run_scan(DummyKISOk(), DummyDART(), 'data/watchlist.example.csv', scope_mode='watchlist_group', watchlist_group_id=gid, score_threshold=0)
     assert out['diagnostics']['scope_mode'] == 'watchlist_group'

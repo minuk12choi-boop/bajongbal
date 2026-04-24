@@ -41,3 +41,5 @@ def test_dashboard_chart_container_and_theme_rank_exists():
     html = (web_app.Path(web_app.__file__).parent / 'templates' / 'dashboard.html').read_text(encoding='utf-8')
     assert '가격 차트' in html
     assert 'themeRankRows' in html
+    assert '공시 데이터 준비 중' not in html
+    assert '트리거 근접도' in html
