@@ -83,3 +83,72 @@ def list_theme_stocks(theme_id: str | None = None, theme_name: str | None = None
     with get_conn() as conn:
         rows = conn.execute(sql, tuple(params)).fetchall()
     return [dict(r) for r in rows]
+
+
+def list_themes() -> list[dict]:
+    return list_theme_filters()
+
+
+def list_theme_stocks_filtered(theme_id: str | None = None, theme_name: str | None = None, code: str | None = None, name: str | None = None, limit: int | None = None) -> list[dict]:
+    sql = 'SELECT code, MAX(name) AS name, MAX(theme_id) AS theme_id, MAX(theme_name) AS theme_name, MAX(updated_at) AS updated_at FROM stock_theme_map WHERE 1=1'
+    params: list[str] = []
+    if theme_id:
+        sql += ' AND theme_id = ?'
+        params.append(theme_id)
+    if theme_name:
+        sql += ' AND theme_name LIKE ?'
+        params.append(f'%{theme_name}%')
+    if code:
+        sql += ' AND code LIKE ?'
+        params.append(f'%{code}%')
+    if name:
+        sql += ' AND name LIKE ?'
+        params.append(f'%{name}%')
+    sql += ' GROUP BY code ORDER BY code ASC'
+    if limit:
+        sql += ' LIMIT ?'
+        params.append(str(limit))
+    with get_conn() as conn:
+        rows = conn.execute(sql, tuple(params)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def list_watchlist_groups() -> list[dict]:
+    with get_conn() as conn:
+        rows = conn.execute('SELECT id,name,description,created_at,updated_at FROM watchlist_groups WHERE COALESCE(is_active,1)=1 ORDER BY id DESC').fetchall()
+    return [dict(r) for r in rows]
+
+
+def list_watchlist_items(group_id: int) -> list[dict]:
+    with get_conn() as conn:
+        rows = conn.execute('SELECT id,group_id,code,name,market,theme_names,memo,added_at,updated_at FROM watchlist_items WHERE group_id=? AND COALESCE(is_active,1)=1 ORDER BY id DESC', (group_id,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def add_watchlist_item(group_id: int, code: str, name: str | None, market: str | None = None, theme_names: str | None = None, memo: str | None = None) -> dict | None:
+    now = now_iso()
+    with get_conn() as conn:
+        conn.execute('INSERT OR IGNORE INTO watchlist_items(group_id,code,name,market,theme_names,memo,added_at,updated_at,is_active) VALUES (?,?,?,?,?,?,?,?,1)', (group_id, str(code), name, market, theme_names, memo, now, now))
+        conn.execute('UPDATE watchlist_items SET is_active=1, name=COALESCE(?,name), market=COALESCE(?,market), theme_names=COALESCE(?,theme_names), memo=COALESCE(?,memo), updated_at=? WHERE group_id=? AND code=?', (name, market, theme_names, memo, now, group_id, str(code)))
+        conn.commit()
+        row = conn.execute('SELECT id,group_id,code,name,market,theme_names,memo,added_at,updated_at FROM watchlist_items WHERE group_id=? AND code=? AND COALESCE(is_active,1)=1', (group_id, str(code))).fetchone()
+    return dict(row) if row else None
+
+
+def remove_watchlist_item(group_id: int, item_id: int | None = None, code: str | None = None) -> int:
+    with get_conn() as conn:
+        if item_id is not None:
+            cur = conn.execute('UPDATE watchlist_items SET is_active=0, updated_at=? WHERE id=? AND group_id=?', (now_iso(), item_id, group_id))
+        else:
+            cur = conn.execute('UPDATE watchlist_items SET is_active=0, updated_at=? WHERE code=? AND group_id=?', (now_iso(), str(code), group_id))
+        conn.commit()
+        return cur.rowcount
+
+
+def get_watchlist_membership(code: str) -> list[dict]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            'SELECT g.id AS group_id, g.name AS group_name, i.id AS item_id, i.added_at FROM watchlist_items i JOIN watchlist_groups g ON g.id = i.group_id WHERE i.code=? AND COALESCE(i.is_active,1)=1 AND COALESCE(g.is_active,1)=1 ORDER BY g.id',
+            (str(code),),
+        ).fetchall()
+    return [dict(r) for r in rows]

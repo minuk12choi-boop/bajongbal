@@ -10,8 +10,6 @@ from bajongbal.config import settings
 from bajongbal.kis.auth import build_auth_headers, get_access_token
 from bajongbal.kis.parsers import safe_float, safe_int
 
-
-# TODO(사용자확인필요): TR_ID/엔드포인트는 실전/모의 계정별로 상이할 수 있으므로 운영 전 최종 확인 필요
 TR_CURRENT = 'FHKST01010100'
 TR_DAILY = 'FHKST01010400'
 TR_INTRADAY = 'FHKST03010200'
@@ -40,6 +38,7 @@ class KISResult:
     status: KISStatus
     message: str
     data: Any = None
+    diagnostics: dict[str, Any] | None = None
 
 
 class KISClient:
@@ -60,6 +59,32 @@ class KISClient:
     def health(self) -> bool:
         return self.health_detail().status == KISStatus.OK
 
+    def _pick_rows(self, data: dict | None) -> list[dict]:
+        d = data or {}
+        for k in ('output2', 'output1', 'output'):
+            v = d.get(k)
+            if isinstance(v, list):
+                return [x for x in v if isinstance(x, dict)]
+        return []
+
+    def _pick_obj(self, data: dict | None) -> dict:
+        d = data or {}
+        for k in ('output', 'output1'):
+            v = d.get(k)
+            if isinstance(v, dict):
+                return v
+        return {}
+
+    def _diag(self, payload: Any, missing: list[str] | None = None) -> dict[str, Any]:
+        keys = list(payload.keys()) if isinstance(payload, dict) else []
+        output = payload.get('output') if isinstance(payload, dict) else None
+        return {
+            'response_keys': keys[:20],
+            'output_type': type(output).__name__,
+            'output_length': len(output) if isinstance(output, list) else (len(output.keys()) if isinstance(output, dict) else 0),
+            'missing_required_fields': missing or [],
+        }
+
     def _get(self, path: str, params: dict[str, Any], tr_id: str) -> KISResult:
         health = self.health_detail()
         if health.status != KISStatus.OK:
@@ -75,43 +100,55 @@ class KISClient:
         res = self._get('/uapi/domestic-stock/v1/quotations/inquire-price', {'FID_COND_MRKT_DIV_CODE': 'J', 'FID_INPUT_ISCD': code}, TR_CURRENT)
         if res.status != KISStatus.OK:
             return res
-        out = (res.data or {}).get('output', {})
-        price = safe_float(out.get('stck_prpr') or out.get('stck_clpr'))
+        out = self._pick_obj(res.data)
+        price = safe_float(out.get('stck_prpr') or out.get('stck_clpr') or out.get('cur_prc') or out.get('close'))
         if price <= 0:
-            return KISResult(KISStatus.PARSE_FAILED, STATUS_MESSAGE[KISStatus.PARSE_FAILED])
-        return KISResult(KISStatus.OK, STATUS_MESSAGE[KISStatus.OK], {'code': code, 'price': price, 'change_rate': safe_float(out.get('prdy_ctrt')), 'volume': safe_int(out.get('acml_vol')), 'trading_value': safe_float(out.get('acml_tr_pbmn') or out.get('acml_tr_pbmn1'))})
+            return KISResult(KISStatus.PARSE_FAILED, STATUS_MESSAGE[KISStatus.PARSE_FAILED], diagnostics=self._diag(res.data, ['price']))
+        return KISResult(
+            KISStatus.OK,
+            STATUS_MESSAGE[KISStatus.OK],
+            {
+                'code': code,
+                'price': price,
+                'change_rate': safe_float(out.get('prdy_ctrt') or out.get('flu_rt') or out.get('change_rate')),
+                'volume': safe_int(out.get('acml_vol') or out.get('cntg_vol') or out.get('volume')),
+                'trading_value': safe_float(out.get('acml_tr_pbmn') or out.get('acml_tr_pbmn1') or out.get('trading_value')),
+                'market_cap': safe_float(out.get('hts_avls') or out.get('market_cap'), default=-1),
+                'market': (out.get('mksc_shrn_iscd') or out.get('market') or '').strip() or 'UNKNOWN',
+            },
+        )
 
     def get_period_ohlcv(self, code: str, timeframe: str = 'D', count: int = 120) -> KISResult:
         period_code_map = {'D': 'D', 'W': 'W', 'M': 'M', 'Y': 'Y'}
         res = self._get('/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice', {'FID_COND_MRKT_DIV_CODE': 'J', 'FID_INPUT_ISCD': code, 'FID_INPUT_DATE_1': '20200101', 'FID_INPUT_DATE_2': '20991231', 'FID_PERIOD_DIV_CODE': period_code_map.get(timeframe, 'D'), 'FID_ORG_ADJ_PRC': '1'}, TR_DAILY)
         if res.status != KISStatus.OK:
             return res
-        rows = (res.data or {}).get('output2', [])
+        rows = self._pick_rows(res.data)
         parsed = []
         for r in rows[:count]:
-            parsed.append({'date': r.get('stck_bsop_date') or r.get('xymd'), 'open': safe_float(r.get('stck_oprc') or r.get('open')), 'high': safe_float(r.get('stck_hgpr') or r.get('high')), 'low': safe_float(r.get('stck_lwpr') or r.get('low')), 'close': safe_float(r.get('stck_clpr') or r.get('close')), 'volume': safe_int(r.get('acml_vol') or r.get('volume')), 'trading_value': safe_float(r.get('acml_tr_pbmn') or r.get('trading_value')), 'timeframe': timeframe})
+            parsed.append({'date': r.get('stck_bsop_date') or r.get('xymd') or r.get('date'), 'open': safe_float(r.get('stck_oprc') or r.get('open')), 'high': safe_float(r.get('stck_hgpr') or r.get('high')), 'low': safe_float(r.get('stck_lwpr') or r.get('low')), 'close': safe_float(r.get('stck_clpr') or r.get('close')), 'volume': safe_int(r.get('acml_vol') or r.get('volume')), 'trading_value': safe_float(r.get('acml_tr_pbmn') or r.get('trading_value')), 'timeframe': timeframe})
         if not parsed:
-            return KISResult(KISStatus.PARSE_FAILED, STATUS_MESSAGE[KISStatus.PARSE_FAILED])
+            return KISResult(KISStatus.PARSE_FAILED, STATUS_MESSAGE[KISStatus.PARSE_FAILED], diagnostics=self._diag(res.data, ['ohlcv_rows']))
         return KISResult(KISStatus.OK, STATUS_MESSAGE[KISStatus.OK], parsed)
 
     def get_intraday_minutes(self, code: str, interval_min: int = 5, points: int = 120) -> KISResult:
         res = self._get('/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice', {'FID_ETC_CLS_CODE': '', 'FID_COND_MRKT_DIV_CODE': 'J', 'FID_INPUT_ISCD': code, 'FID_INPUT_HOUR_1': '', 'FID_PW_DATA_INCU_YN': 'Y'}, TR_INTRADAY)
         if res.status != KISStatus.OK:
             return res
-        rows = (res.data or {}).get('output2', [])
+        rows = self._pick_rows(res.data)
         parsed = []
         for r in rows[:points]:
-            parsed.append({'dt': str(r.get('stck_cntg_hour') or r.get('xymd') or ''), 'open': safe_float(r.get('stck_oprc') or r.get('open')), 'high': safe_float(r.get('stck_hgpr') or r.get('high')), 'low': safe_float(r.get('stck_lwpr') or r.get('low')), 'close': safe_float(r.get('stck_prpr') or r.get('stck_clpr') or r.get('close')), 'volume': safe_int(r.get('cntg_vol') or r.get('acml_vol') or r.get('volume')), 'trading_value': safe_float(r.get('acml_tr_pbmn') or r.get('trading_value'))})
+            parsed.append({'dt': str(r.get('stck_cntg_hour') or r.get('xymd') or r.get('dt') or ''), 'open': safe_float(r.get('stck_oprc') or r.get('open')), 'high': safe_float(r.get('stck_hgpr') or r.get('high')), 'low': safe_float(r.get('stck_lwpr') or r.get('low')), 'close': safe_float(r.get('stck_prpr') or r.get('stck_clpr') or r.get('close')), 'volume': safe_int(r.get('cntg_vol') or r.get('acml_vol') or r.get('volume')), 'trading_value': safe_float(r.get('acml_tr_pbmn') or r.get('trading_value'))})
         if not parsed:
-            return KISResult(KISStatus.PARSE_FAILED, STATUS_MESSAGE[KISStatus.PARSE_FAILED])
+            return KISResult(KISStatus.PARSE_FAILED, STATUS_MESSAGE[KISStatus.PARSE_FAILED], diagnostics=self._diag(res.data, ['intraday_rows']))
         return KISResult(KISStatus.OK, STATUS_MESSAGE[KISStatus.OK], parsed)
 
     def get_daily_minutes(self, code: str, day: str) -> KISResult:
         res = self._get('/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice', {'FID_ETC_CLS_CODE': '', 'FID_COND_MRKT_DIV_CODE': 'J', 'FID_INPUT_ISCD': code, 'FID_INPUT_DATE_1': day, 'FID_PW_DATA_INCU_YN': 'Y'}, TR_INTRADAY_DAILY)
         if res.status != KISStatus.OK:
             return res
-        rows = (res.data or {}).get('output2', [])
-        parsed = [{'dt': str(r.get('stck_cntg_hour') or ''), 'open': safe_float(r.get('stck_oprc')), 'high': safe_float(r.get('stck_hgpr')), 'low': safe_float(r.get('stck_lwpr')), 'close': safe_float(r.get('stck_prpr') or r.get('stck_clpr')), 'volume': safe_int(r.get('cntg_vol') or r.get('acml_vol')), 'trading_value': safe_float(r.get('acml_tr_pbmn'))} for r in rows]
+        rows = self._pick_rows(res.data)
+        parsed = [{'dt': str(r.get('stck_cntg_hour') or r.get('dt') or ''), 'open': safe_float(r.get('stck_oprc') or r.get('open')), 'high': safe_float(r.get('stck_hgpr') or r.get('high')), 'low': safe_float(r.get('stck_lwpr') or r.get('low')), 'close': safe_float(r.get('stck_prpr') or r.get('stck_clpr') or r.get('close')), 'volume': safe_int(r.get('cntg_vol') or r.get('acml_vol') or r.get('volume')), 'trading_value': safe_float(r.get('acml_tr_pbmn') or r.get('trading_value'))} for r in rows]
         if not parsed:
-            return KISResult(KISStatus.PARSE_FAILED, STATUS_MESSAGE[KISStatus.PARSE_FAILED])
+            return KISResult(KISStatus.PARSE_FAILED, STATUS_MESSAGE[KISStatus.PARSE_FAILED], diagnostics=self._diag(res.data, ['daily_minutes_rows']))
         return KISResult(KISStatus.OK, STATUS_MESSAGE[KISStatus.OK], parsed)

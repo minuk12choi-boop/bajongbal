@@ -13,7 +13,19 @@ from bajongbal.config import env_diagnostics, settings
 from bajongbal.dart.client import DartClient
 from bajongbal.kis.client import KISClient
 from bajongbal.scanner.service import run_scan
-from bajongbal.storage.db import get_conn, init_db, list_theme_filters, list_theme_stocks, now_iso
+from bajongbal.storage.db import (
+    add_watchlist_item,
+    get_conn,
+    get_watchlist_membership,
+    init_db,
+    list_theme_filters,
+    list_theme_stocks,
+    list_theme_stocks_filtered,
+    list_watchlist_groups,
+    list_watchlist_items,
+    now_iso,
+    remove_watchlist_item,
+)
 
 
 def _ensure_schema() -> None:
@@ -41,19 +53,9 @@ def _template_response(request: Request, name: str, context: dict):
 def _config_status() -> dict:
     diag = env_diagnostics()
     return {
-        'KIS_APP_KEY': diag['KIS_APP_KEY'],
-        'KIS_APP_SECRET': diag['KIS_APP_SECRET'],
-        'KIS_BASE_URL': diag['KIS_BASE_URL'],
-        'DART_API_KEY': diag['DART_API_KEY'],
-        'kis_base_url_message': 'KIS_BASE_URL 미설정' if not settings.has_kis_base_url else '정상',
-        'cwd': diag['cwd'],
-        'env_candidate_paths': diag['env_candidate_paths'],
-        'selected_env_file': diag['selected_env_file'],
-        'env_file_path': diag['env_file_path'],
-        'env_file_exists': diag['env_file_exists'],
-        'env_file_loaded': diag['env_file_loaded'],
-        'invalid_env_line_count': diag['invalid_env_line_count'],
-        'invalid_env_line_numbers': diag['invalid_env_line_numbers'],
+        'KIS_APP_KEY': diag['KIS_APP_KEY'], 'KIS_APP_SECRET': diag['KIS_APP_SECRET'], 'KIS_BASE_URL': diag['KIS_BASE_URL'], 'DART_API_KEY': diag['DART_API_KEY'],
+        'cwd': diag['cwd'], 'env_candidate_paths': diag['env_candidate_paths'], 'selected_env_file': diag['selected_env_file'], 'env_file_path': diag['env_file_path'],
+        'env_file_exists': diag['env_file_exists'], 'env_file_loaded': diag['env_file_loaded'], 'invalid_env_line_count': diag['invalid_env_line_count'], 'invalid_env_line_numbers': diag['invalid_env_line_numbers'],
     }
 
 
@@ -61,29 +63,32 @@ def _status() -> dict:
     _ensure_schema()
     kis = KISClient(settings.kis_base_url)
     dart = DartClient()
-
     row = None
     try:
         with get_conn() as conn:
             row = conn.execute('SELECT refreshed_at, success, message FROM theme_snapshots ORDER BY id DESC LIMIT 1').fetchone()
     except Exception:
         row = None
-
-    return {
-        'now': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        'kis_ok': kis.health(),
-        'dart_ok': dart.health(),
-        'theme_updated_at': row['refreshed_at'] if row else '테마 캐시 없음',
-        'theme_message': row['message'] if row else '테마 캐시 없음 / 테마 갱신 필요',
-        'config': _config_status(),
-    }
+    return {'now': datetime.now().strftime('%Y-%m-%d %H:%M:%S'), 'kis_ok': kis.health(), 'dart_ok': dart.health(), 'theme_updated_at': row['refreshed_at'] if row else '테마 캐시 없음', 'theme_message': row['message'] if row else '테마 캐시 없음 / 테마 갱신 필요', 'config': _config_status()}
 
 
 @app.get('/', response_class=HTMLResponse)
 @app.get('/dashboard', response_class=HTMLResponse)
 def dashboard(request: Request):
     _ensure_schema()
-    return _template_response(request=request, name='dashboard.html', context={'request': request, 'status': _status(), 'scan': LAST_SCAN})
+    return _template_response(request=request, name='dashboard.html', context={'request': request, 'status': _status(), 'scan': LAST_SCAN, 'active_menu': 'dashboard'})
+
+
+@app.get('/theme-stocks', response_class=HTMLResponse)
+def theme_stocks_page(request: Request):
+    _ensure_schema()
+    return _template_response(request=request, name='theme_stocks.html', context={'request': request, 'status': _status(), 'active_menu': 'theme_stocks'})
+
+
+@app.get('/watchlists', response_class=HTMLResponse)
+def watchlists_page(request: Request):
+    _ensure_schema()
+    return _template_response(request=request, name='watchlists.html', context={'request': request, 'status': _status(), 'active_menu': 'watchlists'})
 
 
 @app.post('/api/themes/refresh')
@@ -91,37 +96,23 @@ def api_theme_refresh():
     _ensure_schema()
     result = refresh_naver_themes()
     with get_conn() as conn:
+        conn.execute('INSERT INTO theme_snapshots(refreshed_at, success, message) VALUES (?,?,?)', (result.last_refreshed_at or now_iso(), int(result.success), result.message))
+        conn.commit()
         theme_cnt = conn.execute('SELECT COUNT(DISTINCT theme_id) FROM theme_constituents').fetchone()[0]
         map_cnt = conn.execute('SELECT COUNT(*) FROM stock_theme_map').fetchone()[0]
         last = conn.execute('SELECT refreshed_at FROM theme_snapshots ORDER BY id DESC LIMIT 1').fetchone()
-
     ok = bool(result.success and theme_cnt > 0 and map_cnt > 0)
-    warning = not ok
-    msg = result.message
-    if map_cnt == 0:
-        msg = '수집 0건: 네이버 HTML 구조 변경 가능성 또는 네트워크 이슈'
-
-    return {
-        'ok': ok,
-        'warning': warning,
-        'status': '성공' if ok else ('경고' if warning else '실패'),
-        'theme_count': theme_cnt,
-        'stock_count': map_cnt,
-        'used_cache': result.used_cache or not ok,
-        'reason': msg,
-        'last_refreshed_at': result.last_refreshed_at or (last['refreshed_at'] if last else None),
-        'html_structure_changed_possible': (map_cnt == 0),
-    }
+    msg = result.message if map_cnt > 0 else '수집 0건: 네이버 HTML 구조 변경 가능성 또는 네트워크 이슈'
+    return {'ok': ok, 'warning': not ok, 'status': '성공' if ok else '경고', 'theme_count': theme_cnt, 'stock_count': map_cnt, 'used_cache': result.used_cache or not ok, 'reason': msg, 'last_refreshed_at': result.last_refreshed_at or (last['refreshed_at'] if last else None), 'html_structure_changed_possible': (map_cnt == 0)}
 
 
 @app.get('/api/themes/list')
 def api_theme_list():
     _ensure_schema()
     items = list_theme_filters()
-    return {
-        'items': items,
-        'message': '수집된 테마가 없습니다. 먼저 [테마 갱신]을 실행하세요.' if not items else 'OK',
-    }
+    with get_conn() as conn:
+        total = conn.execute('SELECT COUNT(*) FROM stock_theme_map').fetchone()[0]
+    return {'items': items, 'summary': {'theme_count': len(items), 'stock_count': total}}
 
 
 @app.get('/api/themes/{theme_id}/stocks')
@@ -130,16 +121,29 @@ def api_theme_stocks(theme_id: str):
     return {'items': list_theme_stocks(theme_id=theme_id)}
 
 
+@app.get('/api/theme-stocks')
+def api_theme_stocks_search(theme_id: str | None = None, theme_name: str | None = None, code: str | None = None, name: str | None = None, market: str | None = None, max_symbols: int = 100):
+    _ensure_schema()
+    base = list_theme_stocks_filtered(theme_id=theme_id, theme_name=theme_name, code=code, name=name, limit=max_symbols)
+    kis = KISClient(settings.kis_base_url)
+    items, warnings, errors = [], [], []
+    for row in base:
+        cur = kis.get_current_price(row['code'])
+        if cur.status != 'OK':
+            errors.append(f"{row['code']}: {cur.status}")
+            items.append({'star': '☆', 'theme_name': row['theme_name'], 'code': row['code'], 'name': row['name'], 'price': '조회 실패', 'change_rate': '조회 실패', 'volume': '조회 실패', 'trading_value': '조회 실패', 'market_cap': '계산 불가', 'market': market or 'UNKNOWN', 'fetched_at': now_iso(), 'kis_status': cur.status})
+            continue
+        d = cur.data
+        items.append({'star': '☆', 'theme_name': row['theme_name'], 'code': row['code'], 'name': row['name'], 'price': d.get('price', '조회 실패'), 'change_rate': d.get('change_rate', '조회 실패'), 'volume': d.get('volume', '조회 실패'), 'trading_value': d.get('trading_value', '조회 실패'), 'market_cap': d.get('market_cap') if d.get('market_cap', -1) >= 0 else '계산 불가', 'market': d.get('market', 'UNKNOWN'), 'fetched_at': now_iso(), 'kis_status': 'OK'})
+    if len(base) >= max_symbols:
+        warnings.append(f'조회 대상이 많아 상위 {max_symbols}건만 조회했습니다.')
+    return {'items': items, 'diagnostics': {'requested_max_symbols': max_symbols, 'returned': len(items)}, 'warnings': warnings, 'errors': errors[:10]}
+
+
 @app.get('/api/themes/status')
 def api_theme_status():
     _ensure_schema()
     return _status()
-
-
-@app.get('/api/themes/today')
-def api_theme_today():
-    _ensure_schema()
-    return {'theme_strengths': LAST_SCAN.get('theme_strengths', [])}
 
 
 @app.post('/api/scan')
@@ -147,17 +151,11 @@ def api_scan(payload: dict | None = None):
     _ensure_schema()
     payload = payload or {}
     out = run_scan(
-        kis=KISClient(settings.kis_base_url),
-        dart=DartClient(),
-        watchlist_path=payload.get('watchlist', 'data/watchlist.example.csv'),
-        score_threshold=float(payload.get('score_threshold', 60)),
-        use_dart=bool(payload.get('use_dart', True)),
-        max_symbols=int(payload.get('max_symbols', 50)),
-        target_mode=payload.get('target_mode', '관심종목'),
-        demo_mode=bool(payload.get('demo_mode', False)),
+        kis=KISClient(settings.kis_base_url), dart=DartClient(), watchlist_path=payload.get('watchlist', 'data/watchlist.example.csv'),
+        score_threshold=float(payload.get('score_threshold', 60)), use_dart=bool(payload.get('use_dart', True)), max_symbols=int(payload.get('max_symbols', 50)),
+        target_mode=payload.get('target_mode', '관심종목'), demo_mode=bool(payload.get('demo_mode', False)),
         watchlist_group_id=int(payload['watchlist_group_id']) if payload.get('watchlist_group_id') else None,
-        theme_id=str(payload['theme_id']) if payload.get('theme_id') else None,
-        theme_name=payload.get('theme_name'),
+        theme_id=str(payload['theme_id']) if payload.get('theme_id') else None, theme_name=payload.get('theme_name'), scope_mode=payload.get('scope_mode'),
     )
     LAST_SCAN.update(out)
     return out
@@ -166,9 +164,13 @@ def api_scan(payload: dict | None = None):
 @app.get('/api/watchlists')
 def api_watchlists():
     _ensure_schema()
-    with get_conn() as conn:
-        rows = conn.execute('SELECT id,name,description,created_at,updated_at FROM watchlist_groups WHERE COALESCE(is_active,1)=1 ORDER BY id DESC').fetchall()
-    return {'items': [dict(r) for r in rows]}
+    return {'items': list_watchlist_groups()}
+
+
+@app.get('/api/watchlists/membership')
+def api_watchlist_membership(code: str):
+    _ensure_schema()
+    return {'items': get_watchlist_membership(code)}
 
 
 @app.post('/api/watchlists')
@@ -188,8 +190,8 @@ def api_watchlist_update(group_id: int, payload: dict):
     with get_conn() as conn:
         conn.execute('UPDATE watchlist_groups SET name=?, description=?, updated_at=? WHERE id=?', (payload['name'], payload.get('description'), now_iso(), group_id))
         conn.commit()
-        row = conn.execute('SELECT id,name,description,created_at,updated_at FROM watchlist_groups WHERE id=?', (group_id,)).fetchone()
-    return dict(row) if row else {'ok': False}
+    rows = list_watchlist_groups()
+    return next((r for r in rows if r['id'] == group_id), {'ok': False})
 
 
 @app.delete('/api/watchlists/{group_id}')
@@ -205,38 +207,19 @@ def api_watchlist_delete(group_id: int):
 @app.get('/api/watchlists/{group_id}/items')
 def api_watchlist_items(group_id: int):
     _ensure_schema()
-    with get_conn() as conn:
-        rows = conn.execute(
-            'SELECT id,group_id,code,name,market,theme_names,memo,added_at,updated_at FROM watchlist_items WHERE group_id=? AND COALESCE(is_active,1)=1 ORDER BY id DESC',
-            (group_id,),
-        ).fetchall()
-    return {'items': [dict(r) for r in rows]}
+    return {'items': list_watchlist_items(group_id)}
 
 
 @app.post('/api/watchlists/{group_id}/items')
 def api_watchlist_item_create(group_id: int, payload: dict):
     _ensure_schema()
-    now = now_iso()
-    with get_conn() as conn:
-        conn.execute(
-            'INSERT OR IGNORE INTO watchlist_items(group_id,code,name,market,theme_names,memo,added_at,updated_at,is_active) VALUES (?,?,?,?,?,?,?,?,1)',
-            (group_id, str(payload['code']), payload.get('name'), payload.get('market'), payload.get('theme_names'), payload.get('memo'), now, now),
-        )
-        conn.execute('UPDATE watchlist_items SET is_active=1, name=COALESCE(?,name), updated_at=? WHERE group_id=? AND code=?', (payload.get('name'), now, group_id, str(payload['code'])))
-        conn.commit()
-        row = conn.execute(
-            'SELECT id,group_id,code,name,market,theme_names,memo,added_at,updated_at FROM watchlist_items WHERE group_id=? AND code=? AND COALESCE(is_active,1)=1',
-            (group_id, str(payload['code'])),
-        ).fetchone()
-    return dict(row)
+    return add_watchlist_item(group_id, str(payload['code']), payload.get('name'), payload.get('market'), payload.get('theme_names'), payload.get('memo'))
 
 
 @app.delete('/api/watchlists/{group_id}/items/{item_id}')
 def api_watchlist_item_delete(group_id: int, item_id: int):
     _ensure_schema()
-    with get_conn() as conn:
-        conn.execute('UPDATE watchlist_items SET is_active=0, updated_at=? WHERE id=? AND group_id=?', (now_iso(), item_id, group_id))
-        conn.commit()
+    remove_watchlist_item(group_id, item_id=item_id)
     return {'ok': True}
 
 
@@ -244,12 +227,9 @@ def api_watchlist_item_delete(group_id: int, item_id: int):
 def api_recent_signals(limit: int = 50, include_demo: bool = False):
     _ensure_schema()
     with get_conn() as conn:
-        if include_demo:
-            rows = conn.execute('SELECT * FROM signals ORDER BY id DESC LIMIT ?', (limit,)).fetchall()
-        else:
-            rows = conn.execute('SELECT * FROM signals WHERE COALESCE(is_demo,0)=0 ORDER BY id DESC LIMIT ?', (limit,)).fetchall()
-        data = [dict(r) for r in rows]
-    return {'items': data}
+        sql = 'SELECT * FROM signals ORDER BY id DESC LIMIT ?' if include_demo else 'SELECT * FROM signals WHERE COALESCE(is_demo,0)=0 ORDER BY id DESC LIMIT ?'
+        rows = conn.execute(sql, (limit,)).fetchall()
+    return {'items': [dict(r) for r in rows]}
 
 
 @app.get('/api/config/status')

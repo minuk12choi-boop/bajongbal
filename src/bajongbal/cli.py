@@ -29,6 +29,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser('sync-dart')
     sub.add_parser('clear-demo-signals')
     sub.add_parser('watchlist-groups')
+    sub.add_parser('themes')
+    ts = sub.add_parser('theme-stocks')
+    ts.add_argument('--theme-id')
+    ts.add_argument('--theme-name')
+    ts.add_argument('--limit', type=int, default=100)
 
     wlc = sub.add_parser('watchlist-create')
     wlc.add_argument('--name', required=True)
@@ -64,6 +69,7 @@ def build_parser() -> argparse.ArgumentParser:
     bc.add_argument('--watchlist-group-id', type=int)
     bc.add_argument('--theme-id')
     bc.add_argument('--theme-name')
+    bc.add_argument('--scope')
 
     sc = sub.add_parser('scan')
     sc.add_argument('--watchlist', default='data/watchlist.example.csv')
@@ -81,6 +87,7 @@ def build_parser() -> argparse.ArgumentParser:
     sc.add_argument('--watchlist-group-id', type=int)
     sc.add_argument('--theme-id')
     sc.add_argument('--theme-name')
+    sc.add_argument('--scope')
 
     web = sub.add_parser('web')
     web.add_argument('--host', default='0.0.0.0')
@@ -116,6 +123,7 @@ def _run_scan(args):
         watchlist_group_id=getattr(args, 'watchlist_group_id', None),
         theme_id=getattr(args, 'theme_id', None),
         theme_name=getattr(args, 'theme_name', None),
+        scope_mode=getattr(args, 'scope', None),
     )
     ymd = datetime.utcnow().strftime('%Y%m%d')
     path = Path(args.output.replace('YYYYMMDD', ymd))
@@ -175,6 +183,17 @@ def main(argv: list[str] | None = None) -> int:
         with get_conn() as conn:
             rows = [dict(r) for r in conn.execute('SELECT id,group_id,code,name,market,theme_names,memo,added_at,updated_at FROM watchlist_items WHERE group_id=? AND COALESCE(is_active,1)=1 ORDER BY id DESC', (args.group_id,)).fetchall()]
         print(json.dumps(rows, ensure_ascii=False))
+        return 0
+
+
+    if args.command == 'themes':
+        from bajongbal.storage.db import list_themes
+        print(json.dumps(list_themes(), ensure_ascii=False))
+        return 0
+
+    if args.command == 'theme-stocks':
+        from bajongbal.storage.db import list_theme_stocks_filtered
+        print(json.dumps(list_theme_stocks_filtered(theme_id=args.theme_id, theme_name=args.theme_name, limit=args.limit), ensure_ascii=False))
         return 0
 
     if args.command == 'refresh-themes':
