@@ -7,14 +7,6 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-import uvicorn
-
-from bajongbal.backtest.engine import run_backtest
-from bajongbal.collectors.naver_theme_collector import refresh_naver_themes
-from bajongbal.config import settings
-from bajongbal.dart.client import DartClient
-from bajongbal.kis.client import KISClient
-from bajongbal.scanner.service import run_scan
 from bajongbal.storage.db import get_conn, init_db
 
 
@@ -74,6 +66,22 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _run_scan(args):
+    from bajongbal.config import settings
+    from bajongbal.dart.client import DartClient
+    from bajongbal.kis.client import KISClient
+    from bajongbal.scanner.service import run_scan
+
+    use_dart = False if getattr(args, 'no_dart', False) else True
+    out = run_scan(KISClient(settings.kis_base_url), DartClient(), args.watchlist, args.score_threshold, use_dart, args.max_symbols)
+    ymd = datetime.utcnow().strftime('%Y%m%d')
+    path = Path(args.output.replace('YYYYMMDD', ymd))
+    if not args.dry_run:
+        _write_csv(path, out['signals'])
+    print(json.dumps({'count': len(out['signals']), 'output': str(path)}, ensure_ascii=False))
+    return out, path
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     init_db()
@@ -81,31 +89,34 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == 'init-db':
         print('DB 초기화 완료')
         return 0
+
     if args.command == 'refresh-themes':
+        from bajongbal.collectors.naver_theme_collector import refresh_naver_themes
+
         print(refresh_naver_themes())
         return 0
+
     if args.command == 'sync-dart':
         print('DART 동기화 구조 준비 완료')
         return 0
+
     if args.command in {'build-candidates', 'scan'}:
-        use_dart = False if getattr(args, 'no_dart', False) else True
-        out = run_scan(KISClient(settings.kis_base_url), DartClient(), args.watchlist, args.score_threshold, use_dart, args.max_symbols)
-        ymd = datetime.utcnow().strftime('%Y%m%d')
-        path = Path(args.output.replace('YYYYMMDD', ymd))
-        if not args.dry_run:
-            _write_csv(path, out['signals'])
-        print(json.dumps({'count': len(out['signals']), 'output': str(path)}, ensure_ascii=False))
+        _, path = _run_scan(args)
         if args.command == 'scan' and not args.once:
             while True:
                 time.sleep(args.interval_seconds)
-                out = run_scan(KISClient(settings.kis_base_url), DartClient(), args.watchlist, args.score_threshold, use_dart, args.max_symbols)
-                if not args.dry_run:
-                    _write_csv(path, out['signals'])
+                _run_scan(args)
         return 0
+
     if args.command == 'web':
+        import uvicorn
+
         uvicorn.run('bajongbal.web.app:app', host=args.host, port=args.port, reload=False)
         return 0
+
     if args.command == 'backtest':
+        from bajongbal.backtest.engine import run_backtest
+
         with get_conn() as conn:
             rows = [dict(r) for r in conn.execute('SELECT * FROM signals').fetchall()]
         res = run_backtest(rows)
@@ -113,6 +124,7 @@ def main(argv: list[str] | None = None) -> int:
         _write_csv(path, [res])
         print(json.dumps(res, ensure_ascii=False))
         return 0
+
     if args.command == 'report':
         with get_conn() as conn:
             rows = [dict(r) for r in conn.execute('SELECT * FROM theme_strengths ORDER BY id DESC LIMIT 200').fetchall()]
