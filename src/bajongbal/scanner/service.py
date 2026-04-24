@@ -7,6 +7,7 @@ from bajongbal.dart.client import DartClient
 from bajongbal.dart.filings import tag_filings
 from bajongbal.kis.client import KISClient, KISStatus
 from bajongbal.market.theme_strength import calculate_theme_strength
+from bajongbal.storage.db import get_conn, list_theme_stocks, now_iso
 from bajongbal.strategy.boxes import detect_box
 from bajongbal.strategy.intraday import analyze_intraday
 from bajongbal.strategy.levels import detect_levels
@@ -15,7 +16,6 @@ from bajongbal.strategy.risk import risk_penalty
 from bajongbal.strategy.scoring import compute_score, grade
 from bajongbal.strategy.signal_types import LONG_BOX_TRIGGER
 from bajongbal.strategy.trade_plan import build_trade_plan
-from bajongbal.storage.db import get_conn, now_iso
 
 
 def _load_watchlist(path: str) -> list[dict]:
@@ -28,10 +28,21 @@ def _load_watchlist(path: str) -> list[dict]:
     return rows
 
 
-def _load_theme_symbols(limit: int) -> list[dict]:
+def _load_theme_symbols(limit: int, theme_id: str | None = None, theme_name: str | None = None) -> list[dict]:
+    rows = list_theme_stocks(theme_id=theme_id, theme_name=theme_name)
+    return [{'code': r['code'], 'name': r['name'] or r['code'], 'market': 'UNKNOWN'} for r in rows[:limit]]
+
+
+def _load_watchlist_group(group_id: int) -> tuple[str | None, list[dict]]:
     with get_conn() as conn:
-        rows = conn.execute('SELECT DISTINCT code, name FROM stock_theme_map WHERE code IS NOT NULL AND code != "" LIMIT ?', (limit,)).fetchall()
-    return [{'code': r['code'], 'name': r['name'] or r['code'], 'market': 'UNKNOWN'} for r in rows]
+        grp = conn.execute('SELECT id, name FROM watchlist_groups WHERE id=? AND COALESCE(is_active,1)=1', (group_id,)).fetchone()
+        if not grp:
+            return None, []
+        items = conn.execute(
+            'SELECT code, COALESCE(name, code) AS name, COALESCE(market,\'UNKNOWN\') AS market FROM watchlist_items WHERE group_id=? AND COALESCE(is_active,1)=1 ORDER BY id ASC',
+            (group_id,),
+        ).fetchall()
+    return grp['name'], [dict(r) for r in items]
 
 
 def _load_theme_names() -> dict[str, list[str]]:
@@ -52,56 +63,95 @@ def run_scan(
     max_symbols: int = 50,
     target_mode: str = '관심종목',
     demo_mode: bool = False,
+    watchlist_group_id: int | None = None,
+    theme_id: str | None = None,
+    theme_name: str | None = None,
 ) -> dict:
     warnings: list[str] = []
     errors: list[str] = []
+    diagnostics = {
+        'target_mode': target_mode,
+        'selected_watchlist_group': None,
+        'watchlist_group_count': 0,
+        'watchlist_item_count': 0,
+        'theme_cache_stock_count': 0,
+        'selected_theme_id': theme_id,
+        'selected_theme_name': theme_name,
+        'selected_theme_stock_count': 0,
+        'requested_max_symbols': max_symbols,
+        'scan_target_count': 0,
+        'kis_current_price_success_count': 0,
+        'kis_current_price_fail_count': 0,
+        'daily_chart_success_count': 0,
+        'daily_chart_fail_count': 0,
+        'weekly_chart_success_count': 0,
+        'monthly_chart_success_count': 0,
+        'minute_chart_success_count': 0,
+        'score_calculated_count': 0,
+        'score_below_threshold_count': 0,
+        'final_signal_count': 0,
+        'errors': [],
+        'warnings': [],
+    }
+
+    with get_conn() as conn:
+        diagnostics['watchlist_group_count'] = conn.execute('SELECT COUNT(*) FROM watchlist_groups WHERE COALESCE(is_active,1)=1').fetchone()[0]
+        diagnostics['theme_cache_stock_count'] = conn.execute('SELECT COUNT(DISTINCT code) FROM stock_theme_map').fetchone()[0]
 
     if target_mode == '테마 전체':
-        watchlist = _load_theme_symbols(max_symbols)
+        selected_all = not theme_id and (not theme_name or theme_name == '전체 테마')
+        if selected_all:
+            watchlist = _load_theme_symbols(max_symbols)
+        else:
+            watchlist = _load_theme_symbols(max_symbols, theme_id=theme_id, theme_name=theme_name)
+        diagnostics['selected_theme_stock_count'] = len(watchlist)
         if not watchlist:
+            msg = '테마 캐시가 없습니다. 테마 캐시가 없어 테마 전체 스캔을 수행하지 않았습니다.' if selected_all else '선택한 테마에 구성 종목이 없습니다.'
+            warnings.append(msg)
+            diagnostics['warnings'] = warnings[:10]
             return {
-                'signals': [],
-                'theme_strengths': [],
-                'warnings': ['테마 캐시가 없습니다. 먼저 [테마 갱신]을 실행하세요.'],
-                'errors': [],
-                'scan_target_count': 0,
-                'scan_success_count': 0,
-                'scan_fail_count': 0,
-                'is_demo': demo_mode,
+                'signals': [], 'theme_strengths': [], 'warnings': warnings, 'errors': [],
+                'scan_target_count': 0, 'scan_success_count': 0, 'scan_fail_count': 0,
+                'is_demo': demo_mode, 'diagnostics': diagnostics,
             }
+    elif target_mode == '관심종목' and watchlist_group_id:
+        group_name, watchlist = _load_watchlist_group(watchlist_group_id)
+        diagnostics['selected_watchlist_group'] = group_name
+        diagnostics['watchlist_item_count'] = len(watchlist)
+        if diagnostics['watchlist_group_count'] == 0:
+            warnings.append('관심종목 그룹이 없습니다. 먼저 그룹을 생성하세요.')
+            diagnostics['warnings'] = warnings[:10]
+            return {'signals': [], 'theme_strengths': [], 'warnings': warnings, 'errors': [], 'scan_target_count': 0, 'scan_success_count': 0, 'scan_fail_count': 0, 'is_demo': demo_mode, 'diagnostics': diagnostics}
+        if not watchlist:
+            warnings.append('선택한 관심종목 그룹에 종목이 없습니다.')
+            diagnostics['warnings'] = warnings[:10]
+            return {'signals': [], 'theme_strengths': [], 'warnings': warnings, 'errors': [], 'scan_target_count': 0, 'scan_success_count': 0, 'scan_fail_count': 0, 'is_demo': demo_mode, 'diagnostics': diagnostics}
     else:
         watchlist = _load_watchlist(watchlist_path)[:max_symbols]
 
     if not watchlist:
-        return {
-            'signals': [],
-            'theme_strengths': [],
-            'warnings': ['스캔 대상 종목이 없습니다.'],
-            'errors': [],
-            'scan_target_count': 0,
-            'scan_success_count': 0,
-            'scan_fail_count': 0,
-            'is_demo': demo_mode,
-        }
+        warnings.append('스캔 대상 종목이 없습니다.')
+        diagnostics['warnings'] = warnings[:10]
+        return {'signals': [], 'theme_strengths': [], 'warnings': warnings, 'errors': [], 'scan_target_count': 0, 'scan_success_count': 0, 'scan_fail_count': 0, 'is_demo': demo_mode, 'diagnostics': diagnostics}
 
     health = kis.health_detail()
     if health.status != KISStatus.OK and not demo_mode:
+        errors.append(health.message)
+        warnings.append('KIS 연결 실패로 실시간 시세 조회 불가')
+        diagnostics['scan_target_count'] = len(watchlist)
+        diagnostics['kis_current_price_fail_count'] = len(watchlist)
+        diagnostics['errors'] = errors[:10]
+        diagnostics['warnings'] = warnings[:10]
         return {
-            'signals': [],
-            'theme_strengths': [],
-            'warnings': ['KIS 연결 실패로 실시간 시세 조회 불가'],
-            'errors': [health.message],
-            'scan_target_count': len(watchlist),
-            'scan_success_count': 0,
-            'scan_fail_count': len(watchlist),
-            'is_demo': False,
+            'signals': [], 'theme_strengths': [], 'warnings': warnings, 'errors': errors,
+            'scan_target_count': len(watchlist), 'scan_success_count': 0, 'scan_fail_count': len(watchlist),
+            'is_demo': False, 'diagnostics': diagnostics,
         }
 
     theme_names_map = _load_theme_names()
     signals = []
     theme_rows = []
     success_count = 0
-    fail_count = 0
 
     for w in watchlist:
         code, name = w['code'], w['name']
@@ -112,10 +162,25 @@ def run_scan(
             minutes = [{'dt': f'09:{i:02d}', 'open': 10000 + i, 'high': 10005 + i, 'low': 9995 + i, 'close': 10001 + i, 'volume': 100 + i, 'trading_value': 100000 + i} for i in range(1, 61)]
         else:
             cur_r = kis.get_current_price(code)
+            if cur_r.status == KISStatus.OK:
+                diagnostics['kis_current_price_success_count'] += 1
+            else:
+                diagnostics['kis_current_price_fail_count'] += 1
             daily_r = kis.get_period_ohlcv(code, 'D', 120)
+            if daily_r.status == KISStatus.OK:
+                diagnostics['daily_chart_success_count'] += 1
+            else:
+                diagnostics['daily_chart_fail_count'] += 1
+            weekly_r = kis.get_period_ohlcv(code, 'W', 60)
+            if weekly_r.status == KISStatus.OK:
+                diagnostics['weekly_chart_success_count'] += 1
+            monthly_r = kis.get_period_ohlcv(code, 'M', 36)
+            if monthly_r.status == KISStatus.OK:
+                diagnostics['monthly_chart_success_count'] += 1
             minutes_r = kis.get_intraday_minutes(code, 5, 60)
+            if minutes_r.status == KISStatus.OK:
+                diagnostics['minute_chart_success_count'] += 1
             if cur_r.status != KISStatus.OK or daily_r.status != KISStatus.OK or minutes_r.status != KISStatus.OK:
-                fail_count += 1
                 errors.append(f'{code}: {cur_r.message if cur_r.status != KISStatus.OK else daily_r.message if daily_r.status != KISStatus.OK else minutes_r.message}')
                 continue
             cur, daily, minutes = cur_r.data, daily_r.data, minutes_r.data
@@ -145,65 +210,49 @@ def run_scan(
                 'risk_penalty': risk_penalty(cur['change_rate'], dart_delta),
             }
             s = compute_score(parts)
+            diagnostics['score_calculated_count'] += 1
             if s < score_threshold:
+                diagnostics['score_below_threshold_count'] += 1
                 continue
 
             plan = build_trade_plan(name, cur['price'], levels, intra, 1.5, 1.2, dart_delta >= -1)
             g = grade(s)
             signal = {
-                'detected_at': now_iso(),
-                'code': code,
-                'name': name,
+                'detected_at': now_iso(), 'code': code, 'name': name,
                 'theme_names': ', '.join(theme_names_map.get(code, ['미분류'])),
-                'signal_type': LONG_BOX_TRIGGER,
-                'signal_grade': g,
-                'score': s,
-                'current_price': cur['price'],
-                'trigger_price': levels['trigger_price'],
-                'nearest_support': levels['nearest_support'],
-                'nearest_resistance': levels['nearest_resistance'],
-                'next_resistance': levels['next_resistance'],
-                'stop_price': levels['stop_price'],
-                'volume_ratio': 1.5,
-                'trading_value_ratio': 1.2,
-                'time_adjusted_volume_ratio': 1.1,
-                'touch_count': intra['touch_count'],
-                'minute_interval': intra['minute_interval'],
-                'minute_window_start': intra['minute_window_start'],
-                'minute_window_end': intra['minute_window_end'],
+                'signal_type': LONG_BOX_TRIGGER, 'signal_grade': g, 'score': s,
+                'current_price': cur['price'], 'trigger_price': levels['trigger_price'],
+                'nearest_support': levels['nearest_support'], 'nearest_resistance': levels['nearest_resistance'],
+                'next_resistance': levels['next_resistance'], 'stop_price': levels['stop_price'],
+                'volume_ratio': 1.5, 'trading_value_ratio': 1.2, 'time_adjusted_volume_ratio': 1.1,
+                'touch_count': intra['touch_count'], 'minute_interval': intra['minute_interval'],
+                'minute_window_start': intra['minute_window_start'], 'minute_window_end': intra['minute_window_end'],
                 'minute_lows_json': json.dumps(intra['minute_lows_json'], ensure_ascii=False),
                 'minute_highs_json': json.dumps(intra['minute_highs_json'], ensure_ascii=False),
-                'minute_trend': intra['minute_trend'],
-                'vwap': intra['vwap'],
-                'is_above_vwap': int(bool(intra['is_above_vwap'])),
-                'theme_score': 50.0,
-                'dart_score': dart_delta,
-                'risk_score': parts['risk_penalty'],
-                'has_333_pattern': int(p333['detected']),
-                'pattern_333_timeframe': '일봉',
-                'pattern_333_grade': p333['grade'],
-                'score_333': score333,
+                'minute_trend': intra['minute_trend'], 'vwap': intra['vwap'], 'is_above_vwap': int(bool(intra['is_above_vwap'])),
+                'theme_score': 50.0, 'dart_score': dart_delta, 'risk_score': parts['risk_penalty'],
+                'has_333_pattern': int(p333['detected']), 'pattern_333_timeframe': '일봉', 'pattern_333_grade': p333['grade'], 'score_333': score333,
                 'reason_json': json.dumps(parts, ensure_ascii=False),
                 'trade_plan_json': json.dumps({**plan, 'pattern_333_summary': summarize_333_pattern(p333)}, ensure_ascii=False),
-                'card_summary': plan['summary'],
-                'box_high': box['box_high'],
-                'box_low': box['box_low'],
-                'box_mid': box['box_mid'],
-                'box_width_pct': box['box_width_pct'],
+                'card_summary': plan['summary'], 'box_high': box['box_high'], 'box_low': box['box_low'], 'box_mid': box['box_mid'], 'box_width_pct': box['box_width_pct'],
                 'is_demo': int(demo_mode),
             }
             signals.append(signal)
             theme_rows.append({'theme_name': signal['theme_names'].split(',')[0], 'name': name, 'score': s, 'change_rate': cur['change_rate'], 'trading_value': cur['trading_value'], 'trading_value_ratio_20': 1.2})
             success_count += 1
         except Exception as exc:
-            fail_count += 1
             errors.append(f'{code}: {exc}')
 
     if demo_mode:
         warnings.append('데모 데이터 모드로 실행되었습니다.')
 
     if not signals:
-        warnings.append('조건을 만족한 후보가 없습니다.')
+        if diagnostics['kis_current_price_fail_count'] == len(watchlist) and len(watchlist) > 0:
+            warnings.append('KIS 현재가 조회에 모두 실패했습니다.')
+        elif diagnostics['score_below_threshold_count'] > 0:
+            warnings.append(f'점수 기준 {int(score_threshold)}점 이상을 만족한 종목이 없습니다.')
+        else:
+            warnings.append('조건을 만족한 후보가 없습니다.')
 
     if not demo_mode:
         with get_conn() as conn:
@@ -214,6 +263,11 @@ def run_scan(
                 conn.execute(f"INSERT INTO signals({','.join(keys)}) VALUES ({','.join(['?']*len(keys))})", vals)
             conn.commit()
 
+    diagnostics['scan_target_count'] = len(watchlist)
+    diagnostics['final_signal_count'] = len(signals)
+    diagnostics['errors'] = errors[:10]
+    diagnostics['warnings'] = warnings[:10]
+
     return {
         'signals': signals,
         'theme_strengths': calculate_theme_strength(theme_rows),
@@ -223,4 +277,5 @@ def run_scan(
         'scan_success_count': success_count,
         'scan_fail_count': len(watchlist) - success_count,
         'is_demo': demo_mode,
+        'diagnostics': diagnostics,
     }

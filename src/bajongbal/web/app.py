@@ -9,11 +9,11 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
 from bajongbal.collectors.naver_theme_collector import refresh_naver_themes
-from bajongbal.config import settings
+from bajongbal.config import env_diagnostics, settings
 from bajongbal.dart.client import DartClient
 from bajongbal.kis.client import KISClient
 from bajongbal.scanner.service import run_scan
-from bajongbal.storage.db import get_conn, init_db
+from bajongbal.storage.db import get_conn, init_db, list_theme_filters, list_theme_stocks, now_iso
 
 
 def _ensure_schema() -> None:
@@ -31,7 +31,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title='BAJONGBAL 급등직전 감지기', lifespan=lifespan)
 templates = Jinja2Templates(directory=str(Path(__file__).parent / 'templates'))
-LAST_SCAN: dict = {'signals': [], 'theme_strengths': [], 'warnings': [], 'errors': [], 'scan_target_count': 0, 'scan_success_count': 0, 'scan_fail_count': 0, 'is_demo': False}
+LAST_SCAN: dict = {'signals': [], 'theme_strengths': [], 'warnings': [], 'errors': [], 'scan_target_count': 0, 'scan_success_count': 0, 'scan_fail_count': 0, 'is_demo': False, 'diagnostics': {}}
 
 
 def _template_response(request: Request, name: str, context: dict):
@@ -39,12 +39,21 @@ def _template_response(request: Request, name: str, context: dict):
 
 
 def _config_status() -> dict:
+    diag = env_diagnostics()
     return {
-        'KIS_APP_KEY': 'Y' if settings.has_kis_app_key else 'N',
-        'KIS_APP_SECRET': 'Y' if settings.has_kis_app_secret else 'N',
-        'KIS_BASE_URL': 'Y' if settings.has_kis_base_url else 'N',
-        'DART_API_KEY': 'Y' if settings.has_dart_api_key else 'N',
+        'KIS_APP_KEY': diag['KIS_APP_KEY'],
+        'KIS_APP_SECRET': diag['KIS_APP_SECRET'],
+        'KIS_BASE_URL': diag['KIS_BASE_URL'],
+        'DART_API_KEY': diag['DART_API_KEY'],
         'kis_base_url_message': 'KIS_BASE_URL 미설정' if not settings.has_kis_base_url else '정상',
+        'cwd': diag['cwd'],
+        'env_candidate_paths': diag['env_candidate_paths'],
+        'selected_env_file': diag['selected_env_file'],
+        'env_file_path': diag['env_file_path'],
+        'env_file_exists': diag['env_file_exists'],
+        'env_file_loaded': diag['env_file_loaded'],
+        'invalid_env_line_count': diag['invalid_env_line_count'],
+        'invalid_env_line_numbers': diag['invalid_env_line_numbers'],
     }
 
 
@@ -95,12 +104,30 @@ def api_theme_refresh():
     return {
         'ok': ok,
         'warning': warning,
+        'status': '성공' if ok else ('경고' if warning else '실패'),
         'theme_count': theme_cnt,
         'stock_count': map_cnt,
-        'used_cache': not ok,
+        'used_cache': result.used_cache or not ok,
         'reason': msg,
-        'last_refreshed_at': last['refreshed_at'] if last else None,
+        'last_refreshed_at': result.last_refreshed_at or (last['refreshed_at'] if last else None),
+        'html_structure_changed_possible': (map_cnt == 0),
     }
+
+
+@app.get('/api/themes/list')
+def api_theme_list():
+    _ensure_schema()
+    items = list_theme_filters()
+    return {
+        'items': items,
+        'message': '수집된 테마가 없습니다. 먼저 [테마 갱신]을 실행하세요.' if not items else 'OK',
+    }
+
+
+@app.get('/api/themes/{theme_id}/stocks')
+def api_theme_stocks(theme_id: str):
+    _ensure_schema()
+    return {'items': list_theme_stocks(theme_id=theme_id)}
 
 
 @app.get('/api/themes/status')
@@ -128,9 +155,89 @@ def api_scan(payload: dict | None = None):
         max_symbols=int(payload.get('max_symbols', 50)),
         target_mode=payload.get('target_mode', '관심종목'),
         demo_mode=bool(payload.get('demo_mode', False)),
+        watchlist_group_id=int(payload['watchlist_group_id']) if payload.get('watchlist_group_id') else None,
+        theme_id=str(payload['theme_id']) if payload.get('theme_id') else None,
+        theme_name=payload.get('theme_name'),
     )
     LAST_SCAN.update(out)
     return out
+
+
+@app.get('/api/watchlists')
+def api_watchlists():
+    _ensure_schema()
+    with get_conn() as conn:
+        rows = conn.execute('SELECT id,name,description,created_at,updated_at FROM watchlist_groups WHERE COALESCE(is_active,1)=1 ORDER BY id DESC').fetchall()
+    return {'items': [dict(r) for r in rows]}
+
+
+@app.post('/api/watchlists')
+def api_watchlist_create(payload: dict):
+    _ensure_schema()
+    now = now_iso()
+    with get_conn() as conn:
+        cur = conn.execute('INSERT INTO watchlist_groups(name,description,created_at,updated_at,is_active) VALUES (?,?,?,?,1)', (payload['name'], payload.get('description'), now, now))
+        conn.commit()
+        row = conn.execute('SELECT id,name,description,created_at,updated_at FROM watchlist_groups WHERE id=?', (cur.lastrowid,)).fetchone()
+    return dict(row)
+
+
+@app.put('/api/watchlists/{group_id}')
+def api_watchlist_update(group_id: int, payload: dict):
+    _ensure_schema()
+    with get_conn() as conn:
+        conn.execute('UPDATE watchlist_groups SET name=?, description=?, updated_at=? WHERE id=?', (payload['name'], payload.get('description'), now_iso(), group_id))
+        conn.commit()
+        row = conn.execute('SELECT id,name,description,created_at,updated_at FROM watchlist_groups WHERE id=?', (group_id,)).fetchone()
+    return dict(row) if row else {'ok': False}
+
+
+@app.delete('/api/watchlists/{group_id}')
+def api_watchlist_delete(group_id: int):
+    _ensure_schema()
+    with get_conn() as conn:
+        conn.execute('UPDATE watchlist_items SET is_active=0, updated_at=? WHERE group_id=?', (now_iso(), group_id))
+        conn.execute('UPDATE watchlist_groups SET is_active=0, updated_at=? WHERE id=?', (now_iso(), group_id))
+        conn.commit()
+    return {'ok': True}
+
+
+@app.get('/api/watchlists/{group_id}/items')
+def api_watchlist_items(group_id: int):
+    _ensure_schema()
+    with get_conn() as conn:
+        rows = conn.execute(
+            'SELECT id,group_id,code,name,market,theme_names,memo,added_at,updated_at FROM watchlist_items WHERE group_id=? AND COALESCE(is_active,1)=1 ORDER BY id DESC',
+            (group_id,),
+        ).fetchall()
+    return {'items': [dict(r) for r in rows]}
+
+
+@app.post('/api/watchlists/{group_id}/items')
+def api_watchlist_item_create(group_id: int, payload: dict):
+    _ensure_schema()
+    now = now_iso()
+    with get_conn() as conn:
+        conn.execute(
+            'INSERT OR IGNORE INTO watchlist_items(group_id,code,name,market,theme_names,memo,added_at,updated_at,is_active) VALUES (?,?,?,?,?,?,?,?,1)',
+            (group_id, str(payload['code']), payload.get('name'), payload.get('market'), payload.get('theme_names'), payload.get('memo'), now, now),
+        )
+        conn.execute('UPDATE watchlist_items SET is_active=1, name=COALESCE(?,name), updated_at=? WHERE group_id=? AND code=?', (payload.get('name'), now, group_id, str(payload['code'])))
+        conn.commit()
+        row = conn.execute(
+            'SELECT id,group_id,code,name,market,theme_names,memo,added_at,updated_at FROM watchlist_items WHERE group_id=? AND code=? AND COALESCE(is_active,1)=1',
+            (group_id, str(payload['code'])),
+        ).fetchone()
+    return dict(row)
+
+
+@app.delete('/api/watchlists/{group_id}/items/{item_id}')
+def api_watchlist_item_delete(group_id: int, item_id: int):
+    _ensure_schema()
+    with get_conn() as conn:
+        conn.execute('UPDATE watchlist_items SET is_active=0, updated_at=? WHERE id=? AND group_id=?', (now_iso(), item_id, group_id))
+        conn.commit()
+    return {'ok': True}
 
 
 @app.get('/api/signals/recent')

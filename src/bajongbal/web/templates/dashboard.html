@@ -7,70 +7,143 @@
   <style>
     body { font-family: sans-serif; margin: 16px; }
     .section { border: 1px solid #ddd; padding: 12px; margin-bottom: 12px; border-radius: 8px; }
-    .badge-a { background: #ffdddd; padding: 2px 6px; border-radius: 4px; }
-    .badge-s { background: #ff5555; color: white; padding: 2px 6px; border-radius: 4px; }
     .badge-demo { background: #7f1d1d; color: #fff; padding: 2px 6px; border-radius: 4px; font-weight: 700; }
     .warn { color: #b91c1c; font-weight: 700; }
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }
+    #loadingOverlay { position: fixed; inset:0; display:none; align-items:center; justify-content:center; background: rgba(0,0,0,0.4); backdrop-filter: blur(2px); z-index: 9999; }
+    #loadingBox { background:#fff; padding:20px; border-radius:10px; min-width:260px; text-align:center; }
+    .hidden { display:none; }
   </style>
 </head>
 <body>
+  <div id="loadingOverlay"><div id="loadingBox"><h3>작업 진행 중</h3><div id="loadingMessage">잠시만 기다려주세요.</div></div></div>
+
   <div class="section">
-    <h1>BAJONGBAL 급등직전 감지기</h1>
+    <h1>BAJONGBAL 급등직전 감지기 <span id="demoBadge" class="badge-demo hidden">데모 데이터</span></h1>
     <div>현재 시각: <span id="now">{{ status.now }}</span></div>
     <div>KIS 연결 상태: {{ '정상' if status.kis_ok else '오류/미설정' }}</div>
     <div>DART 연결 상태: {{ '정상' if status.dart_ok else '오류/미설정' }}</div>
     <div>네이버 테마 캐시 마지막 갱신 시각: {{ status.theme_updated_at }}</div>
     <div>테마 상태 메시지: {{ status.theme_message }}</div>
-    <div>환경변수 상태: KIS_APP_KEY {{status.config.KIS_APP_KEY}} / KIS_APP_SECRET {{status.config.KIS_APP_SECRET}} / KIS_BASE_URL {{status.config.KIS_BASE_URL}} / DART_API_KEY {{status.config.DART_API_KEY}}</div>
     <div class="warn" id="globalWarning"></div>
     <strong style="color:#c00;">자동주문 미사용: 본 화면은 분석/감지 전용이며 최종 매매는 사용자가 직접 판단합니다.</strong>
   </div>
 
   <div class="section">
+    <h2>환경변수/환경파일 진단</h2>
+    <div id="envDiagLine1">환경파일: {{status.config.selected_env_file}} / 발견 {{'Y' if status.config.env_file_exists else 'N'}} / 로드 {{'Y' if status.config.env_file_loaded else 'N'}} / 형식오류 {{status.config.invalid_env_line_count}}건</div>
+    <div id="envDiagLine2">환경변수: KIS_APP_KEY {{status.config.KIS_APP_KEY}} / KIS_APP_SECRET {{status.config.KIS_APP_SECRET}} / KIS_BASE_URL {{status.config.KIS_BASE_URL}} / DART_API_KEY {{status.config.DART_API_KEY}}</div>
+    <pre id="envDiag"></pre>
+  </div>
+
+  <div class="section">
     <h2>조작 영역</h2>
-    <button onclick="refreshThemes()">테마 갱신</button>
-    <button onclick="scanNow()">조회</button>
+    <button id="btnThemeRefresh" onclick="refreshThemes()">테마 갱신</button>
+    <button id="btnThemeList" onclick="loadThemeList()">테마 필터 목록 새로고침</button>
+    <button id="btnScan" onclick="scanNow()">조회</button>
+    <div id="autoRefreshStatus" class="warn"></div>
     <div class="grid">
-      <label>시장 필터 <select id="market"><option>전체</option><option>KOSPI</option><option>KOSDAQ</option></select></label>
       <label>감시 대상 <select id="target"><option>관심종목</option><option>테마 전체</option><option>거래대금 상위</option><option>전체 캐시 종목</option></select></label>
-      <label>최소 점수 <select id="score"><option>60</option><option>70</option><option>80</option><option>90</option></select></label>
-      <label>테마 필터 <input id="themeFilter" /></label>
-      <label>종목 검색 <input id="search" /></label>
+      <label>관심종목 그룹 <select id="watchlistGroup"></select></label>
+      <label>최소 점수 <select id="score"><option>0</option><option selected>60</option><option>70</option><option>80</option><option>90</option></select></label>
+      <label>테마 필터 <select id="themeFilterSelect"><option value="">전체 테마</option></select></label>
       <label>최대 조회 종목 수 <input id="maxSymbols" type="number" value="50" /></label>
       <label>DART 리스크 포함 <select id="useDart"><option value="true">사용</option><option value="false">미사용</option></select></label>
       <label>데모 모드 <select id="demoMode"><option value="false">OFF</option><option value="true">ON</option></select></label>
       <label>자동 새로고침 <select id="refresh"><option value="0">OFF</option><option value="30">30초</option><option value="60">60초</option><option value="120">120초</option></select></label>
     </div>
-    <pre id="themeRefreshResult"></pre>
   </div>
 
+  <div class="section">
+    <h2>관심종목 그룹 관리</h2>
+    <input id="newGroupName" placeholder="그룹명"/><input id="newGroupDesc" placeholder="설명"/>
+    <button id="btnCreateGroup" onclick="createGroup()">그룹 생성</button>
+    <button id="btnUpdateGroup" onclick="updateGroup()">그룹명 수정</button>
+    <button id="btnDeleteGroup" onclick="deleteGroup()">그룹 삭제</button>
+    <hr/>
+    <input id="itemCode" placeholder="종목코드(예: 005930)"/><input id="itemName" placeholder="종목명"/>
+    <button id="btnAddItem" onclick="addItem()">종목 추가</button>
+    <button id="btnLoadItems" onclick="loadItems()">그룹 종목 조회</button>
+    <pre id="watchlistItems"></pre>
+  </div>
+
+  <div class="section"><h2>테마 갱신 결과 영역</h2><pre id="themeRefreshResult"></pre></div>
   <div class="section"><h2>금일 시장/테마 상태</h2><pre id="themeStatus"></pre></div>
+  <div class="section"><h2>스캔 진단 정보</h2><pre id="scanDiagnostics"></pre></div>
   <div class="section"><h2>바종발식 급등직전 후보</h2><div id="scanCount"></div><div id="signalSummary"></div><table border="1" cellpadding="4"><thead><tr><th>종목</th><th>점수</th><th>등급</th><th>유형</th></tr></thead><tbody id="signalTable"></tbody></table></div>
   <div class="section"><h2>종목별 상세 카드</h2><div id="cards"></div></div>
-  <div class="section"><h2>최근 감지 이력</h2><pre id="recent"></pre></div>
+  <div class="section"><h2>최근 감지 이력</h2><button id="btnRecent" onclick="loadRecentSignals()">최근 감지 이력 새로고침</button><pre id="recent"></pre></div>
 
   <script>
+    function showLoading(message){document.getElementById('loadingMessage').textContent = message || '잠시만 기다려주세요.'; document.getElementById('loadingOverlay').style.display='flex';}
+    function hideLoading(){document.getElementById('loadingOverlay').style.display='none';}
+    function setBusy(buttonOrId, busy){const btn = typeof buttonOrId === 'string' ? document.getElementById(buttonOrId) : buttonOrId; if(btn){btn.disabled=busy;}}
+    async function runWithLoading(message, task){showLoading(message); try { return await task(); } catch(e){document.getElementById('globalWarning').textContent = String(e); throw e;} finally {hideLoading();}}
+    async function apiFetchWithLoading(url, options, message){return runWithLoading(message, async ()=>{const r=await fetch(url,options); if(!r.ok){throw new Error(`요청 실패: ${url}`);} return await r.json();});}
+
+    async function loadThemeList(){
+      setBusy('btnThemeList', true);
+      try {
+        const d = await apiFetchWithLoading('/api/themes/list', {}, '수집된 테마 목록을 불러오는 중입니다.');
+        const sel = document.getElementById('themeFilterSelect');
+        sel.innerHTML = '<option value="">전체 테마</option>';
+        (d.items||[]).forEach(t=>{ const opt=document.createElement('option'); opt.value=t.theme_id; opt.textContent=`${t.theme_name} (${t.stock_count})`; opt.dataset.themeName=t.theme_name; sel.appendChild(opt); });
+        if((d.items||[]).length===0){document.getElementById('globalWarning').textContent = d.message;}
+      } finally { setBusy('btnThemeList', false); }
+    }
+
     async function refreshThemes(){
-      const r=await fetch('/api/themes/refresh',{method:'POST'});
-      const d = await r.json();
-      document.getElementById('themeRefreshResult').textContent = JSON.stringify(d, null, 2);
-      if(!d.ok){ document.getElementById('globalWarning').textContent = d.reason || '테마 갱신 실패'; }
+      setBusy('btnThemeRefresh', true);
+      try {
+        const d=await apiFetchWithLoading('/api/themes/refresh',{method:'POST'},'네이버증권 테마를 수집 중입니다. 잠시만 기다려주세요.');
+        document.getElementById('themeRefreshResult').textContent = JSON.stringify(d, null, 2);
+        if(!d.ok){ document.getElementById('globalWarning').textContent = d.reason || '테마 갱신 실패'; }
+        await loadThemeList();
+      } finally { setBusy('btnThemeRefresh', false); }
     }
-    async function scanNow(){
-      const body={
-        score_threshold:Number(document.getElementById('score').value),
-        use_dart:document.getElementById('useDart').value==='true',
-        max_symbols:Number(document.getElementById('maxSymbols').value),
-        target_mode:document.getElementById('target').value,
-        demo_mode:document.getElementById('demoMode').value==='true'
-      };
-      const r=await fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-      const d=await r.json();
-      document.getElementById('themeStatus').textContent=JSON.stringify(d.theme_strengths||[],null,2);
-      renderSignals(d.signals||[], d);
-      const rr=await fetch('/api/signals/recent'); document.getElementById('recent').textContent=JSON.stringify(await rr.json(),null,2);
+
+    async function loadWatchlists(){
+      const d=await fetch('/api/watchlists').then(r=>r.json());
+      const sel=document.getElementById('watchlistGroup'); sel.innerHTML='';
+      (d.items||[]).forEach(g=>{const o=document.createElement('option'); o.value=g.id; o.textContent=`${g.name} (#${g.id})`; sel.appendChild(o);});
+      if((d.items||[]).length===0){sel.innerHTML='<option value="">그룹 없음</option>';}
     }
+
+    async function createGroup(){ setBusy('btnCreateGroup', true); try { await apiFetchWithLoading('/api/watchlists',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:document.getElementById('newGroupName').value,description:document.getElementById('newGroupDesc').value})},'관심종목 그룹을 생성 중입니다.'); await loadWatchlists(); } finally { setBusy('btnCreateGroup', false);} }
+    async function updateGroup(){ setBusy('btnUpdateGroup', true); try { const id=document.getElementById('watchlistGroup').value; await apiFetchWithLoading(`/api/watchlists/${id}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:document.getElementById('newGroupName').value,description:document.getElementById('newGroupDesc').value})},'관심종목 그룹을 수정 중입니다.'); await loadWatchlists(); } finally { setBusy('btnUpdateGroup', false);} }
+    async function deleteGroup(){ setBusy('btnDeleteGroup', true); try { const id=document.getElementById('watchlistGroup').value; await apiFetchWithLoading(`/api/watchlists/${id}`,{method:'DELETE'},'관심종목 그룹을 삭제 중입니다.'); await loadWatchlists(); document.getElementById('watchlistItems').textContent=''; } finally { setBusy('btnDeleteGroup', false);} }
+    async function addItem(){ setBusy('btnAddItem', true); try { const id=document.getElementById('watchlistGroup').value; await apiFetchWithLoading(`/api/watchlists/${id}/items`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code:document.getElementById('itemCode').value,name:document.getElementById('itemName').value})},'관심종목을 추가 중입니다.'); await loadItems(); } finally { setBusy('btnAddItem', false);} }
+    async function deleteItem(id){ await apiFetchWithLoading(`/api/watchlists/${document.getElementById('watchlistGroup').value}/items/${id}`,{method:'DELETE'},'관심종목을 삭제 중입니다.'); await loadItems(); }
+    async function loadItems(){ setBusy('btnLoadItems', true); try { const gid=document.getElementById('watchlistGroup').value; const d=await apiFetchWithLoading(`/api/watchlists/${gid}/items`,{},'관심종목 목록을 불러오는 중입니다.'); document.getElementById('watchlistItems').textContent = JSON.stringify(d.items||[], null, 2); } finally { setBusy('btnLoadItems', false);} }
+
+    async function scanNow(auto=false){
+      const btn='btnScan'; if(!auto) setBusy(btn, true);
+      try {
+        const themeSel = document.getElementById('themeFilterSelect');
+        const selectedOpt = themeSel.options[themeSel.selectedIndex];
+        const body={
+          score_threshold:Number(document.getElementById('score').value),
+          use_dart:document.getElementById('useDart').value==='true',
+          max_symbols:Number(document.getElementById('maxSymbols').value),
+          target_mode:document.getElementById('target').value,
+          demo_mode:document.getElementById('demoMode').value==='true',
+          watchlist_group_id: document.getElementById('watchlistGroup').value || null,
+          theme_id: themeSel.value || null,
+          theme_name: themeSel.value ? selectedOpt.dataset.themeName : '전체 테마'
+        };
+        const d = auto
+          ? await fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json())
+          : await apiFetchWithLoading('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)},'KIS 시세와 바종발식 시그널을 계산 중입니다.');
+        document.getElementById('themeStatus').textContent=JSON.stringify(d.theme_strengths||[],null,2);
+        document.getElementById('scanDiagnostics').textContent=JSON.stringify(d.diagnostics||{}, null, 2);
+        document.getElementById('demoBadge').classList.toggle('hidden', !d.is_demo);
+        renderSignals(d.signals||[], d);
+        await loadRecentSignals();
+      } finally { if(!auto) setBusy(btn, false); }
+    }
+
+    async function loadRecentSignals(){ setBusy('btnRecent', true); try { const rr=await apiFetchWithLoading('/api/signals/recent',{},'최근 감지 이력을 불러오는 중입니다.'); document.getElementById('recent').textContent=JSON.stringify(rr,null,2);} finally { setBusy('btnRecent', false);} }
+
     function renderSignals(items, payload){
       const tb=document.getElementById('signalTable'); const cards=document.getElementById('cards'); tb.innerHTML=''; cards.innerHTML='';
       const warn = (payload.warnings||[]).concat(payload.errors||[]).join(' / ');
@@ -81,16 +154,25 @@
         document.getElementById('signalSummary').textContent='조건을 만족한 후보가 없습니다.';
         return;
       }
-      const strong=items.filter(x=>x.score>=80).length, watch=items.filter(x=>x.score>=70&&x.score<80).length, weak=items.filter(x=>x.score>=60&&x.score<70).length;
-      document.getElementById('signalSummary').textContent=`강한 후보 ${strong} / 관심 후보 ${watch} / 관찰 후보 ${weak}`;
+      const strong=items.filter(x=>x.score>=80).length, watch=items.filter(x=>x.score>=70&&x.score<80).length, weak=items.filter(x=>x.score>=60&&x.score<70).length, diag=items.filter(x=>x.score<60).length;
+      document.getElementById('signalSummary').textContent=`강한 후보 ${strong} / 관심 후보 ${watch} / 관찰 후보 ${weak} / 조건 미달·진단용 ${diag}`;
       items.sort((a,b)=>b.score-a.score).forEach(i=>{
-        const b=i.score>=90?'<span class="badge-s">90+</span>':(i.score>=80?'<span class="badge-a">80+</span>':'');
         const demo = i.is_demo?'<span class="badge-demo">데모 데이터</span>':'';
-        tb.insertAdjacentHTML('beforeend',`<tr><td>${i.name} ${demo}</td><td>${i.score.toFixed(1)} ${b}</td><td>${i.signal_grade}</td><td>${i.signal_type}</td></tr>`);
-        cards.insertAdjacentHTML('beforeend',`<div class='section'><h3>${i.name} (${i.code}) ${demo}</h3><p>${i.card_summary||'조건을 만족한 후보가 없습니다.'}</p><p>판정 사유: ${i.reason_json}</p><p>333: ${i.pattern_333_grade||'계산 불가'} / 점수 ${i.score_333 ?? '계산 불가'}</p><p>가격: 현재가 ${i.current_price ?? '계산 불가'}, 매수후보 ${i.trigger_price ?? '계산 불가'}, 손절 ${i.stop_price ?? '계산 불가'}, 목표 ${i.next_resistance ?? '계산 불가'}</p></div>`)
+        const grade = i.score < 60 ? `${i.signal_grade} (조건 미달/진단용)` : i.signal_grade;
+        tb.insertAdjacentHTML('beforeend',`<tr><td>${i.name} ${demo}</td><td>${i.score.toFixed(1)}</td><td>${grade}</td><td>${i.signal_type}</td></tr>`);
+        cards.insertAdjacentHTML('beforeend',`<div class='section'><h3>${i.name} (${i.code}) ${demo}</h3><p>${i.card_summary||'조건을 만족한 후보가 없습니다.'}</p><p>판정 사유: ${i.reason_json}</p></div>`)
       })
     }
-    document.getElementById('refresh').addEventListener('change',()=>{const sec=Number(document.getElementById('refresh').value); if(window.timer)clearInterval(window.timer); if(sec>0){window.timer=setInterval(scanNow,sec*1000);} });
+
+    document.getElementById('refresh').addEventListener('change',()=>{
+      const sec=Number(document.getElementById('refresh').value);
+      if(window.timer)clearInterval(window.timer);
+      if(sec>0){
+        window.timer=setInterval(async ()=>{document.getElementById('autoRefreshStatus').textContent='자동 새로고침 조회 중...'; try {await scanNow(true);} finally {document.getElementById('autoRefreshStatus').textContent='';}},sec*1000);
+      }
+    });
+
+    loadThemeList(); loadWatchlists(); loadRecentSignals();
   </script>
 </body>
 </html>
