@@ -133,11 +133,11 @@ def api_theme_stats():
     with get_conn() as conn:
         rows = conn.execute('''
             SELECT theme_name, COUNT(DISTINCT code) AS stock_count,
-                   ROUND(AVG(COALESCE(naver_change_rate,0)),2) AS avg_change_rate,
-                   SUM(COALESCE(naver_volume,0)) AS sum_volume,
-                   ROUND(SUM(COALESCE(naver_price,0)*COALESCE(naver_volume,0))/10000.0,2) AS sum_trading_value_10k,
-                   ROUND(SUM(CASE WHEN COALESCE(naver_change_rate,0)>0 THEN 1 ELSE 0 END),0) AS up_count,
-                   ROUND(SUM(CASE WHEN COALESCE(naver_change_rate,0)<=0 THEN 1 ELSE 0 END),0) AS down_count,
+                   NULL AS avg_change_rate,
+                   0 AS sum_volume,
+                   NULL AS sum_trading_value_10k,
+                   NULL AS up_count,
+                   0 AS down_count,
                    MAX(updated_at) AS last_refreshed_at
             FROM stock_theme_map
             GROUP BY theme_name
@@ -147,8 +147,11 @@ def api_theme_stats():
         d=dict(r)
         total=max(int(d.get('stock_count') or 0),1)
         d['up_ratio']=round((float(d.get('up_count') or 0)/total)*100,2)
+        d['sum_trading_value_10k'] = d['sum_trading_value_10k'] if d.get('sum_trading_value_10k') is not None else '시세 미조회'
+        d['avg_change_rate'] = d['avg_change_rate'] if d.get('avg_change_rate') is not None else '시세 미조회'
+        d['up_count'] = d['up_count'] if d.get('up_count') is not None else '시세 미조회'
         items.append(d)
-    return {'items': items}
+    return {'items': items, 'total_count': len(items)}
 
 @app.get('/api/themes/{theme_id}/stocks')
 def api_theme_stocks(theme_id: str):
@@ -190,7 +193,8 @@ def api_theme_stocks_search(theme_id: str | None = None, theme_name: str | None 
         q = fetch_quote_for_code(kis, str(row.get('code')), context='theme_stocks')
         if q.status != 'OK':
             errors.append(f"{row.get('code')}: {q.status}")
-        items.append({'star': '☆', 'theme_name': row.get('theme_name'), 'code': q.code or row.get('code'), 'name': row.get('name'), 'price': q.price, 'change_rate': q.change_rate, 'volume': q.volume, 'trading_value': q.trading_value_10k, 'market_cap': q.market_cap_10k, 'market': q.market, 'fetched_at': now_iso(), 'kis_status': q.status, 'failure_reason': q.failure_reason})
+        market_label = '확인 필요' if q.market == 'UNKNOWN' else q.market
+        items.append({'star': '☆', 'theme_name': row.get('theme_name'), 'code': q.code or row.get('code'), 'name': row.get('name'), 'price': q.price, 'change_rate': q.change_rate, 'volume': q.volume, 'trading_value': q.trading_value_10k, 'market_cap': q.market_cap_10k, 'market': market_label, 'fetched_at': now_iso(), 'kis_status': q.status, 'failure_reason': q.failure_reason})
     
     if status:
         items = [x for x in items if str(x.get('kis_status')) == status]
@@ -214,7 +218,7 @@ def api_scan(payload: dict | None = None):
     payload = payload or {}
     out = run_scan(
         kis=KISClient(settings.kis_base_url), dart=DartClient(), watchlist_path=payload.get('watchlist', 'data/watchlist.example.csv'),
-        score_threshold=float(payload.get('score_threshold', 60)), use_dart=bool(payload.get('use_dart', True)), max_symbols=int(payload.get('max_symbols', 50)),
+        score_threshold=float(payload.get('score_threshold', 60)), use_dart=bool(payload.get('use_dart', True)), max_symbols=int(payload.get('display_limit', payload.get('max_symbols', 50))),
         target_mode=payload.get('target_mode', '관심종목'), demo_mode=bool(payload.get('demo_mode', False)),
         watchlist_group_id=int(payload['watchlist_group_id']) if payload.get('watchlist_group_id') else None,
         theme_id=str(payload['theme_id']) if payload.get('theme_id') else None, theme_name=payload.get('theme_name'), scope_mode=payload.get('scope_mode'), filter_code=payload.get('filter_code'), filter_name=payload.get('filter_name'),
@@ -280,6 +284,10 @@ def api_watchlist_item_create(group_id: int, payload: dict):
         return {'ok': False, 'error': '종목코드가 없습니다.', 'code': ''}
     if not code_valid(code):
         return {'ok': False, 'error': '유효하지 않은 종목코드(6자리 숫자 아님)', 'code': code}
+    with get_conn() as conn:
+        exists = conn.execute("SELECT 1 FROM stock_theme_map WHERE code=? LIMIT 1", (code,)).fetchone()
+    if not exists:
+        return {'ok': False, 'error': '존재하지 않는 종목코드입니다.', 'code': code}
     return add_watchlist_item(group_id, code, payload.get('name'), payload.get('market'), payload.get('theme_names'), payload.get('memo'))
 
 
@@ -339,3 +347,39 @@ def api_quote_diagnose(code: str = ''):
     _ensure_schema()
     kis = KISClient(settings.kis_base_url)
     return diagnose_quote(kis, code)
+
+
+@app.get('/api/stocks/search')
+def api_stocks_search(q: str = '', limit: int = 20):
+    _ensure_schema()
+    q = q.strip()
+    if not q:
+        return {'items': []}
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT code, MAX(name) AS name, MAX(theme_name) AS theme_name, MAX(updated_at) AS updated_at
+            FROM stock_theme_map
+            WHERE code LIKE ? OR name LIKE ?
+            GROUP BY code
+            ORDER BY code
+            LIMIT ?
+            """,
+            (f'%{q}%', f'%{q}%', limit),
+        ).fetchall()
+    return {'items': [dict(r) for r in rows]}
+
+
+@app.get('/api/chart/{code}')
+def api_chart(code: str, timeframe: str = 'day', interval: int = 5, points: int = 120):
+    _ensure_schema()
+    kis = KISClient(settings.kis_base_url)
+    ncode = normalize_code(code)
+    if timeframe == 'minute':
+        out = kis.get_intraday_minutes(ncode, interval, points)
+    else:
+        tf_map = {'day': 'D', 'week': 'W', 'month': 'M', 'year': 'Y'}
+        out = kis.get_period_ohlcv(ncode, tf_map.get(timeframe, 'D'), points)
+    if out.status != 'OK':
+        return {'ok': False, 'code': ncode, 'timeframe': timeframe, 'reason': 'KIS 차트 데이터 없음 또는 호출 실패', 'items': []}
+    return {'ok': True, 'code': ncode, 'timeframe': timeframe, 'interval': interval, 'items': out.data}

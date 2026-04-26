@@ -84,6 +84,19 @@ def test_theme_list_and_scan_diagnostics(tmp_path):
     assert any(('선택한 테마의 구성 종목을 찾을 수 없습니다' in w) or ('선택한 테마에 구성 종목이 없습니다' in w) for w in out2['warnings'])
 
 
+def test_theme_stats_returns_rows_without_quote(tmp_path):
+    from bajongbal.config import settings
+    settings.db_path = tmp_path / 'db.sqlite3'
+    init_db()
+    with get_conn() as conn:
+        conn.execute("INSERT INTO stock_theme_map(code,name,theme_id,theme_name,updated_at) VALUES ('005930','삼성전자','1','반도체','2026-01-01')")
+        conn.commit()
+    c = TestClient(web_app.app)
+    body = c.get('/api/theme-stats').json()
+    assert body['total_count'] > 0
+    assert body['items'][0]['theme_name']
+
+
 def test_watchlist_scan_warning_without_groups(tmp_path):
     from bajongbal.config import settings
     from bajongbal.scanner.service import run_scan

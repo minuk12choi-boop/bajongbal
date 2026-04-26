@@ -91,10 +91,20 @@ class KISClient:
             return KISResult(health.status, health.message)
         try:
             res = requests.get(f'{self.base_url}{path}', headers=build_auth_headers(tr_id), params=params, timeout=10)
-            res.raise_for_status()
-            return KISResult(KISStatus.OK, STATUS_MESSAGE[KISStatus.OK], res.json())
-        except Exception:
-            return KISResult(KISStatus.API_FAILED, STATUS_MESSAGE[KISStatus.API_FAILED])
+            data = res.json() if res.content else {}
+            if res.status_code >= 400:
+                diag = {
+                    'http_status': res.status_code,
+                    'rt_cd': data.get('rt_cd') if isinstance(data, dict) else None,
+                    'msg_cd': data.get('msg_cd') if isinstance(data, dict) else None,
+                    'msg1': data.get('msg1') if isinstance(data, dict) else None,
+                    'response_keys': list(data.keys())[:20] if isinstance(data, dict) else [],
+                    'has_output': bool(isinstance(data, dict) and any(k in data for k in ('output', 'output1', 'output2'))),
+                }
+                return KISResult(KISStatus.API_FAILED, STATUS_MESSAGE[KISStatus.API_FAILED], diagnostics=diag)
+            return KISResult(KISStatus.OK, STATUS_MESSAGE[KISStatus.OK], data)
+        except Exception as e:
+            return KISResult(KISStatus.API_FAILED, STATUS_MESSAGE[KISStatus.API_FAILED], diagnostics={'error_type': type(e).__name__})
 
     def get_current_price(self, code: str) -> KISResult:
         res = self._get('/uapi/domestic-stock/v1/quotations/inquire-price', {'FID_COND_MRKT_DIV_CODE': 'J', 'FID_INPUT_ISCD': code}, TR_CURRENT)

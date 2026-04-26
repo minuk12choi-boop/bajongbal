@@ -35,6 +35,7 @@ def test_theme_stocks_sort_failure_bottom_function_exists():
     html = (web_app.Path(web_app.__file__).parent / 'templates' / 'theme_stocks.html').read_text(encoding='utf-8')
     assert 'failRank' in html
     assert '↕' in html and '▲' in html and '▼' in html
+    assert 'filter-grid' in html and 'minmax(180px,1fr)' in html
 
 
 def test_dashboard_chart_container_and_theme_rank_exists():
@@ -43,3 +44,10 @@ def test_dashboard_chart_container_and_theme_rank_exists():
     assert 'themeRankRows' in html
     assert '공시 데이터 준비 중' not in html
     assert '트리거 근접도' in html
+    assert 'chartTf' in html and 'chartIv' in html
+
+
+def test_types_page_has_8_subtypes():
+    html = (web_app.Path(web_app.__file__).parent / 'templates' / 'types.html').read_text(encoding='utf-8')
+    for key in ['박스권 상단 돌파 시도형', '눌림목 재상승형', '지지선 반등형', '거래량 동반 압축해제형', '분봉 저점상승 압력형', '333 패턴 보조형', '공시 안정형', '테마 동조형']:
+        assert key in html

@@ -106,6 +106,13 @@ def run_scan(
         'filter_name': filter_name,
         'filtered_target_count': 0,
         'display_limit': max_symbols,
+        'scan_universe_count': 0,
+        'evaluated_count': 0,
+        'displayed_count': 0,
+        'threshold_pass_count': 0,
+        'threshold_fail_count': 0,
+        'failed_count': 0,
+        'unknown_market_count': 0,
     }
 
     with get_conn() as conn:
@@ -157,6 +164,7 @@ def run_scan(
         all_targets = [x for x in all_targets if filter_name.lower() in str(x.get('name','')).lower()]
     diagnostics['filtered_target_count'] = len(all_targets)
     diagnostics['scan_target_count_before_limit'] = len(all_targets)
+    diagnostics['scan_universe_count'] = len(all_targets)
     watchlist = all_targets
     diagnostics['scan_target_count'] = len(watchlist)
 
@@ -170,7 +178,7 @@ def run_scan(
         return {'signals': [], 'theme_strengths': [], 'warnings': warnings, 'errors': errors, 'scan_target_count': len(watchlist), 'scan_success_count': 0, 'scan_fail_count': len(watchlist), 'is_demo': False, 'diagnostics': diagnostics}
 
     theme_map = _theme_names()
-    signals, theme_rows = [], []
+    signals, below_threshold_signals, failed_items, theme_rows = [], [], [], []
     success = 0
 
     for w in watchlist:
@@ -179,6 +187,7 @@ def run_scan(
             diagnostics['invalid_code_count'] += 1
             errors.append(f'{code}: INVALID_CODE')
             diagnostics['kis_current_price_fail_count'] += 1
+            failed_items.append({'code': code, 'name': name, 'reason': 'INVALID_CODE'})
             continue
         if demo_mode:
             cur = {'code': code, 'price': 10000.0, 'change_rate': 0.5, 'volume': 100000, 'trading_value': 1000000000}
@@ -201,8 +210,11 @@ def run_scan(
                 reason = quote.status if quote.status != KISStatus.OK else ('API_FAILED' if any(x.status == KISStatus.API_FAILED for x in (daily_r, minutes_r)) else 'PARSE_FAILED')
                 summary = quote.diagnostics or daily_r.diagnostics or minutes_r.diagnostics or {}
                 errors.append(f'{code}: {reason} / {summary}')
+                failed_items.append({'code': code, 'name': name, 'reason': reason})
                 continue
             cur, daily, minutes = quote.raw_data, daily_r.data, minutes_r.data
+            if quote.market == 'UNKNOWN':
+                diagnostics['unknown_market_count'] += 1
 
         levels = detect_levels(daily, cur['price'])
         box = detect_box(daily)
@@ -227,28 +239,55 @@ def run_scan(
         }
         s = compute_score(parts)
         diagnostics['score_calculated_count'] += 1
+        diagnostics['evaluated_count'] += 1
+        minute_low_values = [float(x) for x in intra.get('minute_lows_json', []) if isinstance(x, (int, float))]
+        tags = []
+        if abs(cur['price'] - levels['trigger_price']) / max(levels['trigger_price'], 1) <= 0.03:
+            tags.append('박스권 상단 돌파 시도형')
+        if abs(cur['price'] - levels['nearest_support']) / max(levels['nearest_support'], 1) <= 0.02:
+            tags.append('지지선 반등형')
+        if intra.get('minute_trend') == 'UP':
+            tags.append('분봉 저점상승 압력형')
+        if float(parts['pattern_333']) > 0:
+            tags.append('333 패턴 보조형')
+        if float(parts['dart_stability']) >= 3:
+            tags.append('공시 안정형')
+        if float(parts['theme_sync']) >= 6:
+            tags.append('테마 동조형')
+        if float(parts['touch_pressure']) >= 9:
+            tags.append('눌림목 재상승형')
+        if float(parts['volume_heat']) >= 14:
+            tags.append('거래량 동반 압축해제형')
+        main_subtype = tags[0] if tags else '박스권 상단 돌파 시도형'
         if s < score_threshold:
             diagnostics['score_below_threshold_count'] += 1
-            continue
+            diagnostics['threshold_fail_count'] += 1
 
         plan = build_trade_plan(name, cur['price'], levels, intra, 1.5, 1.2, dart_delta >= -1)
+        w_start = str(intra.get('minute_window_start') or '')
+        w_end = str(intra.get('minute_window_end') or '')
+        w_start, w_end = sorted([w_start.zfill(6), w_end.zfill(6)])
         signal = {
             'detected_at': now_iso(), 'code': code, 'name': name, 'theme_names': ', '.join(theme_map.get(code, ['미분류'])),
             'signal_type': LONG_BOX_TRIGGER, 'signal_grade': grade(s), 'score': s, 'current_price': cur['price'],
             'trigger_price': levels['trigger_price'], 'nearest_support': levels['nearest_support'], 'nearest_resistance': levels['nearest_resistance'],
             'next_resistance': levels['next_resistance'], 'stop_price': levels['stop_price'], 'volume_ratio': 1.5, 'trading_value_ratio': 1.2,
             'time_adjusted_volume_ratio': 1.1, 'touch_count': intra['touch_count'], 'minute_interval': intra['minute_interval'],
-            'minute_window_start': intra['minute_window_start'], 'minute_window_end': intra['minute_window_end'], 'minute_lows_json': json.dumps(intra['minute_lows_json'], ensure_ascii=False),
+            'minute_window_start': w_start, 'minute_window_end': w_end, 'minute_lows_json': json.dumps(intra['minute_lows_json'], ensure_ascii=False),
             'minute_highs_json': json.dumps(intra['minute_highs_json'], ensure_ascii=False), 'minute_trend': intra['minute_trend'], 'vwap': intra['vwap'],
             'is_above_vwap': int(bool(intra['is_above_vwap'])), 'theme_score': 50.0, 'dart_score': dart_delta, 'risk_score': parts['risk_penalty'],
             'has_333_pattern': int(p333['detected']), 'pattern_333_timeframe': '일봉', 'pattern_333_grade': p333['grade'], 'score_333': score333,
             'reason_json': json.dumps(parts, ensure_ascii=False), 'trade_plan_json': json.dumps({**plan, 'pattern_333_summary': summarize_333_pattern(p333)}, ensure_ascii=False),
             'card_summary': plan['summary'], 'box_high': box['box_high'], 'box_low': box['box_low'], 'box_mid': box['box_mid'], 'box_width_pct': box['box_width_pct'], 'is_demo': int(demo_mode),
-            'signal_subtype_main': '박스권 돌파',
-            'signal_tags': '눌림목,거래량,분봉추세',
+            'signal_subtype_main': main_subtype,
+            'signal_tags': ','.join(tags),
             'dart_status': dart_status,
         }
-        signals.append(signal)
+        if s >= score_threshold:
+            signals.append(signal)
+            diagnostics['threshold_pass_count'] += 1
+        else:
+            below_threshold_signals.append(signal)
         theme_rows.append({'theme_name': signal['theme_names'].split(',')[0], 'name': name, 'score': s, 'change_rate': cur['change_rate'], 'trading_value': cur['trading_value'], 'trading_value_ratio_20': 1.2})
         success += 1
 
@@ -270,9 +309,12 @@ def run_scan(
             conn.commit()
 
     signals.sort(key=lambda x: float(x.get('score', 0)), reverse=True)
-    displayed_signals = signals[:max_symbols]
+    pool = signals + below_threshold_signals
+    displayed_signals = pool[:max_symbols]
     diagnostics['final_signal_count'] = len(displayed_signals)
-    diagnostics['raw_signal_count'] = len(signals)
+    diagnostics['raw_signal_count'] = len(pool)
+    diagnostics['displayed_count'] = len(displayed_signals)
+    diagnostics['failed_count'] = len(failed_items)
     diagnostics['errors'] = errors[:10]
     diagnostics['warnings'] = warnings[:10]
-    return {'signals': displayed_signals, 'theme_strengths': calculate_theme_strength(theme_rows), 'warnings': warnings, 'errors': errors, 'scan_target_count': len(watchlist), 'scan_success_count': success, 'scan_fail_count': len(watchlist)-success, 'is_demo': demo_mode, 'diagnostics': diagnostics}
+    return {'signals': displayed_signals, 'qualified_signals': signals, 'below_threshold_signals': below_threshold_signals, 'failed_items': failed_items, 'theme_strengths': calculate_theme_strength(theme_rows), 'warnings': warnings, 'errors': errors, 'scan_target_count': len(watchlist), 'scan_success_count': success, 'scan_fail_count': len(watchlist)-success, 'is_demo': demo_mode, 'diagnostics': diagnostics}
