@@ -7,7 +7,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from bajongbal.storage.db import get_conn, init_db
+from bajongbal.storage.db import get_conn, init_db, now_iso
 
 
 def _write_csv(path: Path, rows: list[dict]) -> None:
@@ -25,9 +25,36 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest='command')
 
     sub.add_parser('init-db')
-    sub.add_parser('refresh-themes')
+    rt = sub.add_parser('refresh-themes')
+    rt.add_argument('--force', action='store_true')
+    sub.add_parser('clear-theme-cache')
     sub.add_parser('sync-dart')
     sub.add_parser('clear-demo-signals')
+    sub.add_parser('watchlist-groups')
+    sub.add_parser('themes')
+    ts = sub.add_parser('theme-stocks')
+    ts.add_argument('--theme-id')
+    ts.add_argument('--theme-name')
+    ts.add_argument('--limit', type=int, default=100)
+
+    wlc = sub.add_parser('watchlist-create')
+    wlc.add_argument('--name', required=True)
+    wlc.add_argument('--description', default='')
+
+    wld = sub.add_parser('watchlist-delete')
+    wld.add_argument('--group-id', type=int, required=True)
+
+    wla = sub.add_parser('watchlist-add')
+    wla.add_argument('--group-id', type=int, required=True)
+    wla.add_argument('--code', required=True)
+    wla.add_argument('--name', default='')
+
+    wlr = sub.add_parser('watchlist-remove')
+    wlr.add_argument('--group-id', type=int, required=True)
+    wlr.add_argument('--code', required=True)
+
+    wli = sub.add_parser('watchlist-items')
+    wli.add_argument('--group-id', type=int, required=True)
 
     bc = sub.add_parser('build-candidates')
     bc.add_argument('--date', required=True)
@@ -41,6 +68,10 @@ def build_parser() -> argparse.ArgumentParser:
     bc.add_argument('--dry-run', action='store_true')
     bc.add_argument('--target-mode', default='관심종목')
     bc.add_argument('--demo-mode', action='store_true')
+    bc.add_argument('--watchlist-group-id', type=int)
+    bc.add_argument('--theme-id')
+    bc.add_argument('--theme-name')
+    bc.add_argument('--scope')
 
     sc = sub.add_parser('scan')
     sc.add_argument('--watchlist', default='data/watchlist.example.csv')
@@ -55,6 +86,10 @@ def build_parser() -> argparse.ArgumentParser:
     sc.add_argument('--dry-run', action='store_true')
     sc.add_argument('--target-mode', default='관심종목')
     sc.add_argument('--demo-mode', action='store_true')
+    sc.add_argument('--watchlist-group-id', type=int)
+    sc.add_argument('--theme-id')
+    sc.add_argument('--theme-name')
+    sc.add_argument('--scope')
 
     web = sub.add_parser('web')
     web.add_argument('--host', default='0.0.0.0')
@@ -78,12 +113,25 @@ def _run_scan(args):
     from bajongbal.scanner.service import run_scan
 
     use_dart = False if getattr(args, 'no_dart', False) else True
-    out = run_scan(KISClient(settings.kis_base_url), DartClient(), args.watchlist, args.score_threshold, use_dart, args.max_symbols, target_mode=args.target_mode, demo_mode=args.demo_mode)
+    out = run_scan(
+        KISClient(settings.kis_base_url),
+        DartClient(),
+        args.watchlist,
+        args.score_threshold,
+        use_dart,
+        args.max_symbols,
+        target_mode=args.target_mode,
+        demo_mode=args.demo_mode,
+        watchlist_group_id=getattr(args, 'watchlist_group_id', None),
+        theme_id=getattr(args, 'theme_id', None),
+        theme_name=getattr(args, 'theme_name', None),
+        scope_mode=getattr(args, 'scope', None),
+    )
     ymd = datetime.utcnow().strftime('%Y%m%d')
     path = Path(args.output.replace('YYYYMMDD', ymd))
     if not args.dry_run:
         _write_csv(path, out['signals'])
-    print(json.dumps({'count': len(out['signals']), 'output': str(path)}, ensure_ascii=False))
+    print(json.dumps({'count': len(out['signals']), 'output': str(path), 'diagnostics': out.get('diagnostics', {})}, ensure_ascii=False))
     return out, path
 
 
@@ -95,10 +143,71 @@ def main(argv: list[str] | None = None) -> int:
         print('DB 초기화 완료')
         return 0
 
+    if args.command == 'watchlist-groups':
+        with get_conn() as conn:
+            rows = [dict(r) for r in conn.execute('SELECT id,name,description,created_at,updated_at FROM watchlist_groups WHERE COALESCE(is_active,1)=1 ORDER BY id DESC').fetchall()]
+        print(json.dumps(rows, ensure_ascii=False))
+        return 0
+
+    if args.command == 'watchlist-create':
+        with get_conn() as conn:
+            conn.execute('INSERT INTO watchlist_groups(name,description,created_at,updated_at,is_active) VALUES (?,?,?,?,1)', (args.name, args.description, now_iso(), now_iso()))
+            conn.commit()
+        print('관심종목 그룹 생성 완료')
+        return 0
+
+    if args.command == 'watchlist-delete':
+        with get_conn() as conn:
+            conn.execute('UPDATE watchlist_items SET is_active=0, updated_at=? WHERE group_id=?', (now_iso(), args.group_id))
+            conn.execute('UPDATE watchlist_groups SET is_active=0, updated_at=? WHERE id=?', (now_iso(), args.group_id))
+            conn.commit()
+        print('관심종목 그룹 삭제 완료')
+        return 0
+
+    if args.command == 'watchlist-add':
+        with get_conn() as conn:
+            conn.execute(
+                'INSERT OR REPLACE INTO watchlist_items(group_id,code,name,added_at,updated_at,is_active) VALUES (?,?,?,?,?,1)',
+                (args.group_id, args.code, args.name, now_iso(), now_iso()),
+            )
+            conn.commit()
+        print('관심종목 추가 완료')
+        return 0
+
+    if args.command == 'watchlist-remove':
+        with get_conn() as conn:
+            conn.execute('UPDATE watchlist_items SET is_active=0, updated_at=? WHERE group_id=? AND code=?', (now_iso(), args.group_id, args.code))
+            conn.commit()
+        print('관심종목 삭제 완료')
+        return 0
+
+    if args.command == 'watchlist-items':
+        with get_conn() as conn:
+            rows = [dict(r) for r in conn.execute('SELECT id,group_id,code,name,market,theme_names,memo,added_at,updated_at FROM watchlist_items WHERE group_id=? AND COALESCE(is_active,1)=1 ORDER BY id DESC', (args.group_id,)).fetchall()]
+        print(json.dumps(rows, ensure_ascii=False))
+        return 0
+
+
+    if args.command == 'themes':
+        from bajongbal.storage.db import list_themes
+        print(json.dumps(list_themes(), ensure_ascii=False))
+        return 0
+
+    if args.command == 'theme-stocks':
+        from bajongbal.storage.db import list_theme_stocks_filtered
+        print(json.dumps(list_theme_stocks_filtered(theme_id=args.theme_id, theme_name=args.theme_name, limit=args.limit), ensure_ascii=False))
+        return 0
+
+    if args.command == 'clear-theme-cache':
+        from bajongbal.storage.db import clear_theme_cache
+        clear_theme_cache()
+        print('테마 캐시 초기화 완료')
+        return 0
+
     if args.command == 'refresh-themes':
         from bajongbal.collectors.naver_theme_collector import refresh_naver_themes
 
-        print(refresh_naver_themes())
+        print(refresh_naver_themes(force=getattr(args, 'force', False)))
         return 0
 
     if args.command == 'sync-dart':
@@ -113,7 +222,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command in {'build-candidates', 'scan'}:
-        _, path = _run_scan(args)
+        _run_scan(args)
         if args.command == 'scan' and not args.once:
             while True:
                 time.sleep(args.interval_seconds)
